@@ -109,6 +109,14 @@
 
 ### Fixes
 
+- **Guest transports fail instead of hanging when a VM stops responding** — A
+  paused VM, a wedged sshd, or a lost TAP device left `ssh`, `scp`, and `rsync`
+  calls blocked on a dead socket with no deadline, so lifecycle commands,
+  `coop exec`, and `coop push`/`pull` hung until interrupted. Every transport
+  now derives from one option list that sets `BatchMode`, a connect timeout,
+  and a liveness probe, so a guest whose sshd stops answering fails after ~90s
+  — the bound interactive sessions already had.
+
 - **Fail closed on an unmanaged `CODEX_HOME` in ChatGPT auth mode** (#441) —
   The guest wrapper now refuses an explicitly set `CODEX_HOME` when coop's
   managed `~/.codex/config.toml` selects keyring storage. This prevents `codex
