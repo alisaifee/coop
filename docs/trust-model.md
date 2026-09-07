@@ -49,6 +49,18 @@ user launched it.
   `tar_pipe_pull` / `rsync_pull` bring guest-authored file contents, filenames,
   and symlinks onto the host filesystem. This is the **widest guest→host
   channel** and the primary place a path-traversal or symlink escape could land.
+- **Rootfs files touched while loop-mounted during setup.** `setup.rs`
+  `patch_guest_network` reads and rewrites the guest's `/etc/hosts`, and `coop
+  commit` turns a guest-mutated rootfs into an image template — so the guest
+  authors both the contents and the directory entry at that path on every later
+  create/restore. Contents are read bounded and best-effort
+  (`bound_guest_hosts` degrades to a default rather than aborting the
+  lifecycle). Hosts-file operations use pinned directory descriptors, reject
+  symlinked `/etc`, and read only regular files checked through an `O_PATH`
+  descriptor. Replacement is atomic; permissions are set on the new file's
+  descriptor. Other paths remain **host** paths: `MountGuard::simple` is a
+  loop mount, not a chroot, so the traversal rule below still applies to the
+  hostname and network-config writes. Those paths are not currently validated.
 - **Guest command output read by the host.** e.g. `check_guest_dirty` reads
   `git status --porcelain` from the guest. Today this only gates control flow /
   is printed to the user — it is never fed into `sh -c` on the host. Keep it
@@ -126,13 +138,20 @@ user `env_forward` entries, and the VM SSH key. The invariants:
   from the staged set only stops coop *copying* one, it removes nothing), and
   `coop codex` refuses to launch when the guest config does not actually
   select the keyring store — otherwise the wrapper would pass through to plain
-  Codex and write the token in the clear.
+  Codex and write the token in the clear. The wrapper also fails closed when a
+  session-level `CODEX_HOME` is set while coop's managed
+  `~/.codex/config.toml` selects keyring mode; coop does not otherwise stage or
+  maintain an alternate Codex home.
 
 ## SSH boundary
 
 - coop connects to the guest with `StrictHostKeyChecking=no`,
   `UserKnownHostsFile=/dev/null`, `IdentitiesOnly=yes`
-  (`backend.rs:SshTarget::ssh_opts`, `workspace.rs:ssh_config_block`). This is
+  (`backend.rs:SshTarget::transport_opts` — the one list `ssh`, `scp`, and
+  rsync's `-e` all derive from — and `workspace.rs:ssh_config_block`). coop's
+  own transports add `BatchMode=yes`, so a rejected key fails instead of
+  falling back to a password prompt; the `~/.ssh/config` block written for the
+  user's own `ssh coop-<name>` deliberately does not. This is
   deliberate: guest keys are ephemeral and regenerated per VM, so there is no
   stable host key to pin. The trade-off is that a MITM on the path to the guest
   is not detected — acceptable because that path is loopback / a local TAP link

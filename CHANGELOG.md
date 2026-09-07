@@ -16,8 +16,34 @@
   which is meaningless on subcommands that never start an agent session.
   Existing images must be rebuilt with `coop setup --rebuild` before using this
   mode. A restart reuses the old guest disk, so an existing VM also needs
-  `coop restore <vm> --image <image>` (or a destroy and recreate) to pick up
-  the new guest packages.
+  `coop restore <vm> --image <image> --reprovision` (or a destroy and
+  recreate) to pick up the new guest packages.
+- **`coop restore --reprovision` — start over without re-typing anything**
+  (#432) — Replaces a clobbered or bloated guest filesystem with a fresh copy of
+  the instance's image, then provisions it as a first boot: `/workspace` is
+  restored from the source the instance recorded — re-synced, re-cloned or
+  re-mounted — agents are re-bootstrapped, and plugins, marketplaces and MCP
+  servers are reinstalled. The instance is left running, so no follow-up
+  `coop start` is needed. It keeps its name, index, IP, image, disk size, port
+  forwards and guest env — including a devcontainer's `containerEnv` and
+  `forwardPorts` — so those flags do not have to be remembered. GitHub PATs and
+  provider credentials live in the host-side secret store and are untouched.
+  Extra `--extra-mount` directories, `--exclude-git` and a devcontainer's
+  `postStartCommand` are not replayed, because coop does not persist them.
+
+  This is what `coop restore` + `coop start` could not do: a restart skips the
+  workspace sync and the plugin install on the assumption that both survived on
+  the guest disk — which holds for a `coop commit` checkpoint, but not after the
+  disk is replaced with a base image. Plain `restore` + `start` remains the
+  checkpoint rollback; `--reprovision` is the base-image case.
+
+  `--image` becomes optional under `--reprovision`, defaulting to the image the
+  instance already records; it stays required otherwise. `-y` skips the
+  confirmation and is required off a TTY. `-y`, `--no-agents` and `--no-prompt`
+  are rejected without `--reprovision`, since none of them mean anything to a
+  plain disk swap. Unlike a plain `restore`, which requires a stopped instance,
+  `--reprovision` also accepts a running one and stops it itself. `coop restore`
+  without `--reprovision` is unchanged.
 
 - **Credential-injecting proxy — keep the model API keys out of the guest**
   (#411) — New opt-in `[proxy]` config. When set, coop runs a small host-side
@@ -90,6 +116,32 @@
   name (`coop start <name>`, `coop shell <name>`).
 
 ### Fixes
+
+- **Guest transports fail instead of hanging when a VM stops responding** — A
+  paused VM, a wedged sshd, or a lost TAP device left `ssh`, `scp`, and `rsync`
+  calls blocked on a dead socket with no deadline, so lifecycle commands,
+  `coop exec`, and `coop push`/`pull` hung until interrupted. Every transport
+  now derives from one option list that sets `BatchMode`, a connect timeout,
+  and a liveness probe, so a guest whose sshd stops answering fails after ~90s
+  — the bound interactive sessions already had.
+
+- **The guest hostname resolves, so `sudo` stops warning** — Instance creation
+  renamed the Firecracker guest to `claude-<name>` in `/etc/hostname` but left
+  the image's `127.0.1.1 claude-vm` entry in `/etc/hosts`, so every `sudo` in
+  the guest printed `sudo: unable to resolve host claude-<name>` before running.
+  Both files are now written together at create and restore, and the guest
+  hostname is clamped to fit the kernel's 64-byte hostname limit so long
+  instance names still get a resolvable name. No image rebuild is needed — the patch is
+  per-instance, and the image's own entry is what gets overwritten — but
+  `patch_guest_network` runs only on create and restore, so an existing VM
+  keeps the stale entry until `coop restore <vm> --image <image>` or a destroy
+  and recreate.
+
+- **Fail closed on an unmanaged `CODEX_HOME` in ChatGPT auth mode** (#441) —
+  The guest wrapper now refuses an explicitly set `CODEX_HOME` when coop's
+  managed `~/.codex/config.toml` selects keyring storage. This prevents `codex
+  login` from silently writing a plaintext refresh token to the alternate
+  directory, including a workspace path that syncs back to the host.
 
 - **Install Codex's complete runtime package** (#442) — Recent Codex releases
   use a companion `codex-code-mode-host` executable, but coop installed only
