@@ -159,6 +159,9 @@ CI must pass before a pull request can merge. The
   and **`./tests/integration-uninstall.sh`** — installer provenance, update,
   and uninstall flows.
 - **`./tests/integration-network.sh`** — Linux bridge isolation.
+- **`./tests/integration-proxy-forward.sh`** — authenticated SSH reverse
+  forwarding and rejected-bind cleanup on Linux.
+- **`python3 tests/test-preflight-release.py`** — release gate regression checks.
 - **`python3 tests/test-integration-probes.py`** — regression checks for
   integration probes.
 - **`cargo deny --workspace check`** — advisories, licenses, bans, and sources.

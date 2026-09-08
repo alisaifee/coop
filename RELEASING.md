@@ -6,7 +6,7 @@ How a `coop` release is cut, and what to check before cutting one.
 
 - **`ci.yml`** runs on pushes to `main` and on every PR: `fmt --check`, `clippy -D warnings`,
   `cargo test --workspace`, the preflight/probe regression tests, Linux bridge
-  isolation, `integration-install.sh`, `integration-update.sh`,
+  isolation, `integration-proxy-forward.sh`, `integration-install.sh`, `integration-update.sh`,
   `integration-uninstall.sh`,
   `cargo deny --workspace check`, `taplo format --check`, and `zizmor`.
 - **`release.yml`** runs when a `v*` tag is pushed. It **re-runs all of CI as a

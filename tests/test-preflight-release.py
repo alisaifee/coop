@@ -36,9 +36,11 @@ if [[ "${0##*/} $*" == "${PREFLIGHT_FAIL:-}" ]]; then exit 1; fi
 if [[ "$1" == rev-parse ]]; then exit 1; fi
 ''')
         for name in ('integration-install.sh', 'integration-update.sh',
-                     'integration-uninstall.sh', 'integration-network.sh'):
+                     'integration-uninstall.sh', 'integration-network.sh',
+                     'integration-proxy-forward.sh'):
             self.executable('tests/' + name, '''#!/bin/bash
 printf '%s\n' "${0##*/}" >> "$PREFLIGHT_CALLS"
+if [[ "${0##*/}" == "${PREFLIGHT_FAIL:-}" ]]; then exit 1; fi
 ''')
         for name in ('test-integration-probes.py', 'test-preflight-release.py'):
             (self.root / 'tests' / name).write_text(
@@ -71,16 +73,19 @@ printf '%s\n' "${0##*/}" >> "$PREFLIGHT_CALLS"
                      'cargo test --workspace', 'cargo deny --workspace check',
                      'cargo build --release --workspace --target aarch64-unknown-linux-musl',
                      'taplo format --check', 'test-integration-probes.py',
-                     'test-preflight-release.py', 'integration-network.sh'):
+                     'test-preflight-release.py', 'integration-network.sh',
+                     'integration-proxy-forward.sh'):
             self.assertIn(call, calls)
         self.assertNotIn('Next: tag', result.stdout)
         self.assertIn('unrun gates before tagging', result.stdout)
 
-    def test_non_linux_bridge_gate_is_reported_as_unrun(self):
+    def test_non_linux_namespace_gates_are_reported_as_unrun(self):
         self.executable('bin/uname', '#!/bin/bash\necho Darwin\n')
         result = self.run_preflight()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Bridge isolation requires Linux', result.stdout)
+        self.assertIn('Proxy reverse forwarding requires Linux', result.stdout)
+        self.assertNotIn('integration-proxy-forward.sh', self.log.read_text().splitlines())
         self.assertNotIn('integration-network.sh', self.log.read_text().splitlines())
         self.assertNotIn('Next: tag', result.stdout)
 
@@ -89,6 +94,11 @@ printf '%s\n' "${0##*/}" >> "$PREFLIGHT_CALLS"
         result = self.run_preflight()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Cargo.lock coop-proxy version (9.8.6)', result.stdout)
+
+    def test_proxy_forward_failure_is_fatal(self):
+        result = self.run_preflight(fail='integration-proxy-forward.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FAIL: Integration — proxy reverse forwarding', result.stdout)
 
     def test_workspace_test_failure_is_fatal(self):
         result = self.run_preflight(fail='cargo test --workspace')

@@ -804,6 +804,108 @@ mod tests {
         assert!(!fwd_pid_path(&inst, "test").exists());
     }
 
+    // The runner supplies real OpenSSH in disposable network/PID namespaces:
+    // the host destination and guest reverse listener use the same port.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires tests/integration-proxy-forward.sh"]
+    fn reverse_forward_requires_authenticated_bind_acknowledgment() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let fixture = PathBuf::from(std::env::var("COOP_FORWARD_TEST_DIR").unwrap());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut inst = inst_with_index(0);
+        inst.dir = tmp.path().to_path_buf();
+        let target = SshTarget {
+            host: crate::backend::Hostname::new("192.0.2.2").unwrap(),
+            port: std::num::NonZeroU16::new(2222).unwrap(),
+            user: crate::backend::SshUser::new("root").unwrap(),
+            key_path: fixture.join("client"),
+        };
+        let master_pid = || -> i32 {
+            fs::read_to_string(fixture.join("master.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let port = destination.local_addr().unwrap().port();
+        spawn_reverse_forward(&inst, "test", &target, port).unwrap();
+        let pid = master_pid();
+        assert_eq!(
+            fs::read_to_string(fwd_pid_path(&inst, "test")).unwrap(),
+            pid.to_string()
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+
+        // Send through the guest listener and receive at the host destination.
+        // This also proves the authenticated master survives socket removal.
+        let mut sender = Command::new("ip")
+            .args(["netns", "exec", "guest", "python3", "-c"])
+            .arg("import socket,sys; s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=5); s.sendall(b'forwarded'); assert s.recv(2)==b'ok'")
+            .arg(port.to_string())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut connection = loop {
+            match destination.accept() {
+                Ok((connection, _)) => break Ok(connection),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "forwarded traffic never arrived");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => break Err(error),
+            }
+        }
+        .unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut payload = [0; 9];
+        connection.read_exact(&mut payload).unwrap();
+        assert_eq!(&payload, b"forwarded");
+        connection.write_all(b"ok").unwrap();
+        assert!(sender.wait().unwrap().success());
+        kill_pid_file(&fwd_pid_path(&inst, "test"), "test tunnel");
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+
+        // Occupy exactly the guest loopback port. Authentication still works;
+        // only the subsequent reverse-forward bind must be refused.
+        let ready = fixture.join("occupied");
+        let mut blocker = Command::new("ip")
+            .args(["netns", "exec", "guest", "python3", "-c"])
+            .arg("import socket,sys,pathlib,time; s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(); pathlib.Path(sys.argv[2]).touch(); time.sleep(30)")
+            .arg(port.to_string())
+            .arg(&ready)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(blocker.try_wait().unwrap().is_none(), "bind blocker exited");
+            assert!(Instant::now() < deadline, "bind blocker never became ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let result = spawn_reverse_forward(&inst, "test", &target, port);
+        let rejected_pid = master_pid();
+        assert!(
+            result.is_err(),
+            "authenticated reverse bind refusal must fail startup"
+        );
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains("request failed"), "{error:#}");
+        assert!(!fwd_pid_path(&inst, "test").exists());
+        assert_eq!(unsafe { libc::kill(rejected_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        blocker.kill().unwrap();
+        blocker.wait().unwrap();
+    }
+
     #[test]
     fn token_file_round_trips_and_clears() {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -76,6 +76,24 @@ Firecracker `--full` phase checks actual VM TAP flags and both direct and routed
 traffic; it also detects removal of the helper call from `setup_tap`. This
 host-only gate does not replace Firecracker or Lima VM integration.
 
+## Host-only proxy reverse-forward test
+
+Run `./tests/integration-proxy-forward.sh` on Linux to exercise the production
+reverse-tunnel startup against real OpenSSH. It authenticates with throwaway
+keys, witnesses traffic through an accepted forward, then occupies the guest
+loopback port and requires startup to return an error without publishing a PID
+or leaving the SSH master alive. Separate host and guest network namespaces
+allow the destination and reverse listener to use the same port.
+
+The runner requires Rust/Cargo, Python 3, passwordless sudo, iproute2,
+util-linux, coreutils, hostname, and OpenSSH client/server tools. It builds
+unprivileged, then confines the fixture to disposable mount, network, UTS, and
+PID namespaces. No user SSH configuration or keys are used. Namespace teardown
+removes all children and temporary files on success, failure, or timeout.
+Linux CI and release preflight run this gate explicitly; ordinary unit tests
+mark it ignored, and macOS preflight reports it as unrun. This host test does
+not replace the Firecracker and Lima VM integration gates.
+
 ## Mutation testing
 
 Mutation testing finds unit tests that pass even when the code is broken — real

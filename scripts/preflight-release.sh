@@ -153,6 +153,14 @@ run_bridge_isolation() {
   ./tests/integration-network.sh
 }
 
+run_proxy_forward() {
+  if [[ "$(uname -s)" != Linux ]]; then
+    warn "Proxy reverse forwarding requires Linux — run tests/integration-proxy-forward.sh on a Linux host before tagging"
+    return 0
+  fi
+  ./tests/integration-proxy-forward.sh
+}
+
 run_taplo() {
   if ! have taplo; then
     warn "taplo not installed — TOML formatting skipped (CI still runs it; use scripts/install-dev-tools.sh)"
@@ -296,6 +304,7 @@ step "TOML formatting" run_taplo
 step "Integration probe regression tests" python3 tests/test-integration-probes.py
 step "Release preflight regression tests" python3 tests/test-preflight-release.py
 step "Integration — bridge isolation" run_bridge_isolation
+step "Integration — proxy reverse forwarding" run_proxy_forward
 step "Integration — installer provenance" ./tests/integration-install.sh
 step "Integration — coop update" ./tests/integration-update.sh
 step "Integration — coop uninstall" ./tests/integration-uninstall.sh
