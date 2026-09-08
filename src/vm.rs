@@ -574,10 +574,13 @@ fn kill_process_on_socket(socket_path: &std::path::Path) {
 /// PAM/`login.defs`, not ours: under a hardened `UMASK` (027 in the CIS
 /// baseline) the file would land unreadable to every unprivileged reader
 /// of it — `stop`, `status`, `check_alive` and `Instance::is_running`.
+/// Set the creation mask before publishing the file: chmod afterwards leaves
+/// a window where the unprivileged startup poll fails with `PermissionDenied`.
+/// The subshell preserves the VMM's inherited umask; POSIX `$$` still names
+/// the parent shell that execs Firecracker.
 const PID_TRAMPOLINE: &str = concat!(
     r#"rm -f "$1" || exit 1; "#,
-    r#"echo $$ > "$1" || exit 1; "#,
-    r#"chmod 644 "$1" || exit 1; "#,
+    r#"(umask 022; echo $$ > "$1") || exit 1; "#,
     r#"shift; exec "$@""#,
 );
 
@@ -695,6 +698,37 @@ mod tests {
         let back: MachineConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.vcpu_count, 4);
         assert_eq!(back.mem_size_mib, 3072);
+    }
+
+    #[test]
+    fn pid_trampoline_publishes_readable_pid_under_hardened_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("firecracker.pid");
+        // Pause any post-publication chmod in the shell itself. This makes the
+        // old create-then-chmod window deterministic without sudo or a VM.
+        // The replacement process also stays alive until the test reaps it.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "umask 077; chmod() {{ kill -STOP $$; command chmod \"$@\"; }}; {}",
+                crate::vm::PID_TRAMPOLINE,
+            ))
+            .arg("sh")
+            .arg(&path)
+            .args(["sleep", "30"])
+            .spawn()
+            .unwrap();
+        let published = wait_for_pid_file(&path, Duration::from_secs(5));
+        let mode = std::fs::metadata(&path).map(|m| m.permissions().mode() & 0o777);
+        let expected_pid = child.id();
+        // Reap even when an assertion below fails, including the stopped shell.
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(published.unwrap(), expected_pid);
+        assert_eq!(mode.unwrap(), 0o644);
     }
 
     #[test]

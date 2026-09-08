@@ -834,7 +834,7 @@ Kept across the wipe, because coop persists them host-side:
 | Port forwards, including a devcontainer's `forwardPorts` | `forwards.json` |
 | Guest env, including a devcontainer's `containerEnv` | `guest_env.json` |
 | Model mode and proxy settings | `model.json` / `proxy.json` |
-| GitHub PATs and provider credentials | host secret store (never on the guest disk) |
+| Credentials saved in the host secret store | unchanged; guest forwarding depends on the configured auth mode |
 
 **Not replayed**, because coop does not persist them:
 
@@ -842,7 +842,11 @@ Kept across the wipe, because coop persists them host-side:
 - `--exclude-git`. A workspace originally pushed without `.git/` is re-synced with it.
 - A devcontainer's `postStartCommand`, which reaches the guest only during `coop up`. Its `features` are baked into the image and so do survive. (`postCreateCommand` is unaffected because coop does not implement it — it is reported as an unrecognised `devcontainer.json` key.)
 
-Everything that can fail cheaply is checked while the instance is still intact — the image exists, the state files parse, the recorded workspace directory is still there, and no host port for a forward is taken. Only then is the disk replaced. A failure after that point leaves the instance in place with a partly provisioned guest, and re-running the same command finishes the job.
+Before replacing the disk, coop checks that the image exists, the state files
+parse, the recorded workspace directory is still there, and host ports for
+forwards are available. A later failure leaves the instance in place with a
+partly provisioned guest. Re-running the command replaces the disk again and
+restarts provisioning; save any guest-only work before retrying.
 
 Compared with the neighbouring commands:
 
