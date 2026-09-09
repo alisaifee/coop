@@ -17,6 +17,7 @@ coop runs Claude Code and Codex inside isolated virtual machines. On Linux, it s
 - x86_64 or arm64 architecture (x86_64 is the primary test target; arm64 builds are available but untested)
 - `sudo` privileges (Firecracker uses jailer and TAP networking)
 - `curl`, `tar`, `e2fsprogs` (for `mkfs.ext4`, `resize2fs`)
+- Setup also checks for `setfacl`, `unsquashfs`, `ssh`, and `rsync`. Automatic installation of missing tools requires `apt-get`; on other hosts, install the packages providing the reported tools manually and rerun `coop setup`. See [backend prerequisites](backends.md#prerequisites-1).
 
 ## Install
 
