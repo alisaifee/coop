@@ -5438,6 +5438,41 @@ CFGEOF
         return
     fi
 
+    # A directory at the credential path makes rm -f fail even for guest root.
+    # Proxy startup must refuse to continue.
+    if px_exec mkdir ./.codex/auth.json && px stop "$inst_name"; then
+        if px start "$inst_name"; then
+            fail "proxy restart fails closed when auth cleanup fails" "start unexpectedly succeeded"
+        elif [[ "$HARNESS_ERR" == *"Failed to remove stale guest ~/.codex/auth.json"* ]]; then
+            pass "proxy restart fails closed when auth cleanup fails"
+        else
+            fail "proxy restart fails closed when auth cleanup fails" "unexpected failure: $HARNESS_ERR"
+        fi
+        # Start without bootstrap to remove the deliberate obstruction, then
+        # the normal restart below tests successful stale-file cleanup.
+        px stop "$inst_name" || true
+        if ! px start "$inst_name" --no-agents \
+            || ! px_exec rmdir ./.codex/auth.json; then
+            fail "recover proxy VM after auth cleanup refusal" "stderr: $HARNESS_ERR"
+        fi
+    else
+        fail "prepare auth cleanup refusal" "stderr: $HARNESS_ERR"
+    fi
+
+    # Existing direct-auth VMs (and committed images) can already contain this
+    # file. Excluding it from the host copy alone does not remove guest state.
+    if px_exec sh -c 'mkdir -p ~/.codex && printf stale > ~/.codex/auth.json' \
+        && px_exec test -f ./.codex/auth.json; then
+        pass "seed stale Codex auth.json before proxy restart"
+    else
+        fail "seed stale Codex auth.json before proxy restart" "stderr: $(guest_stderr)"
+    fi
+    if px stop "$inst_name" && px start "$inst_name"; then
+        pass "restart proxy VM with stale direct credentials exits 0"
+    else
+        fail "restart proxy VM with stale direct credentials exits 0" "stderr: $HARNESS_ERR"
+    fi
+
     # Pin the user-facing status contract against the same running instance.
     # Literal credentials are deliberately used above, so this also proves the
     # command redacts them rather than leaking either value to stdout.
@@ -5501,11 +5536,11 @@ STATEEOF
         fail "codex config.toml readable" "cat failed; stderr: $(guest_stderr)"
     fi
 
-    # auth.json must not be staged in proxy mode (issue #411 §7).
-    if px_exec test -f ./.codex/auth.json; then
-        fail "codex auth.json not staged in proxy mode" "auth.json present in guest"
+    # The seeded auth.json must be actively removed, not only excluded from staging.
+    if px_exec test ! -e ./.codex/auth.json; then
+        pass "codex proxy restart removes stale auth.json"
     else
-        pass "codex auth.json not staged in proxy mode"
+        fail "codex proxy restart removes stale auth.json" "auth.json remains or guest check failed: $(guest_stderr)"
     fi
 
     # ── Crown jewel: raw keys never enter the guest env ──
