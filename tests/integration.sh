@@ -1034,6 +1034,63 @@ test_claude_bin_path() {
     fi
 }
 
+test_grok_bin_path() {
+    echo ""
+    echo "=== Phase: grok binary path ==="
+
+    if guest_exec test -x /home/ubuntu/.grok/bin/grok; then
+        pass "grok binary exists at GROK_BIN path"
+    else
+        skip "grok binary at GROK_BIN path" "not installed in this image"
+        return
+    fi
+
+    if coop_exec /home/ubuntu/.grok/bin/grok --version >/dev/null; then
+        pass "grok binary invocable via full path"
+    else
+        skip "grok --version" "binary exists but --version returned non-zero"
+    fi
+
+    local link_target
+    if link_target=$(guest_exec readlink /usr/local/bin/grok); then
+        if [[ "$link_target" == "/home/ubuntu/.grok/bin/grok" ]]; then
+            pass "grok symlink in /usr/local/bin"
+        else
+            fail "grok symlink in /usr/local/bin" "points to: $link_target"
+        fi
+    else
+        fail "grok symlink in /usr/local/bin" "not found"
+    fi
+
+    local guest_path
+    if guest_path=$(guest_exec printenv PATH); then
+        if [[ ":$guest_path:" == *":/home/ubuntu/.grok/bin:"* ]]; then
+            pass "~/.grok/bin on PATH in non-interactive session"
+        else
+            fail "~/.grok/bin on PATH in non-interactive session" "PATH=$guest_path"
+        fi
+    else
+        fail "~/.grok/bin on PATH in non-interactive session" "printenv PATH failed; stderr: $(guest_stderr)"
+    fi
+
+    if guest_exec test -x /usr/local/bin/grok-yolo; then
+        pass "grok-yolo shortcut exists"
+    else
+        fail "grok-yolo shortcut exists" "stderr: $(guest_stderr)"
+    fi
+
+    local yolo_content
+    if yolo_content=$(guest_exec cat /usr/local/bin/grok-yolo); then
+        if echo "$yolo_content" | grep -q "always-approve"; then
+            pass "grok-yolo includes --always-approve"
+        else
+            fail "grok-yolo includes --always-approve" "content: $yolo_content"
+        fi
+    else
+        fail "grok-yolo includes --always-approve" "cat failed"
+    fi
+}
+
 test_claude_settings_merge() {
     echo ""
     echo "=== Phase: claude settings merge across restart ==="
@@ -6499,6 +6556,7 @@ main() {
     test_editor
     test_exec
     test_claude_bin_path
+    test_grok_bin_path
     test_claude_settings_merge
     test_claude_onboarding_seed
     test_codex_bin_path
