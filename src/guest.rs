@@ -816,6 +816,10 @@ mod tests {
             SCRIPT_GROK.contains("/.grok/bin/grok"),
             "Grok installer should verify ~/.grok/bin/grok",
         );
+        assert!(
+            !SCRIPT_GROK.contains("trap "),
+            "Grok installer must not replace the concatenated script's EXIT trap"
+        );
     }
 
     #[test]

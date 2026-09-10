@@ -1798,6 +1798,14 @@ mod tests {
             "codex-yolo should route through the account wrapper so keyring \
              mode works from an in-guest shell",
         );
+        assert!(
+            script.contains("Installing Grok Build CLI"),
+            "base recipe should install Grok Build CLI",
+        );
+        assert!(
+            script.contains("https://x.ai/cli/install.sh"),
+            "base recipe should use the official Grok installer",
+        );
         no_consecutive_concat(&script);
     }
 

@@ -1516,7 +1516,7 @@ fn compose_provision_script(
     s.push_str(SCRIPT_CODEX_ACCOUNT);
     s.push('\n');
 
-    // Grok Build (direct binary download, runs as the guest user)
+    // Grok Build (official installer, runs as the guest user)
     s.push_str(SCRIPT_GROK);
     s.push('\n');
 
@@ -2135,6 +2135,25 @@ mod tests {
             script.contains("exec codex-account --dangerously-bypass-approvals-and-sandbox"),
             "codex-yolo should route through the account wrapper so keyring \
              mode works from an in-guest shell",
+        );
+    }
+
+    #[test]
+    fn provision_script_installs_grok() {
+        let script = compose_provision_script(
+            "ssh-ed25519 AAAA test@test",
+            &[],
+            &[],
+            &GuestUser::default(),
+        );
+
+        assert!(
+            script.contains("Installing Grok Build CLI"),
+            "Lima provision script should install Grok Build CLI",
+        );
+        assert!(
+            script.contains("https://x.ai/cli/install.sh"),
+            "Lima provision script should use the official Grok installer",
         );
     }
 

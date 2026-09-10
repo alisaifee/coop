@@ -18,7 +18,6 @@ else
     # stdin from /dev/null avoids this.
     INSTALLER=$(mktemp)
     chmod 644 "$INSTALLER"
-    trap 'rm -f "$INSTALLER"' EXIT
 
     # Retry with exponential backoff — transient network errors are common
     # during cloud-init (DNS not ready, CDN hiccups, etc.).
@@ -35,6 +34,7 @@ else
                  "after $MAX_RETRIES attempts." >&2
             echo "  [guest] curl exit code: $CURL_EXIT" >&2
             echo "  [guest] curl error: ${CURL_ERR:-none}" >&2
+            rm -f "$INSTALLER"
             exit 1
         fi
         echo "  [guest] Download failed (attempt $attempt/$MAX_RETRIES," \
@@ -44,6 +44,7 @@ else
     done
 
     su - "${GUEST_USER}" -c "bash '$INSTALLER'" </dev/null
+    rm -f "$INSTALLER"
 
     if [ ! -x "/home/${GUEST_USER}/.grok/bin/grok" ]; then
         echo "  [guest] ERROR: Grok Build installer finished but" \
