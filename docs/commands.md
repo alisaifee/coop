@@ -59,6 +59,7 @@ Use `--git-repo <url>` instead of `DIR` to clone a remote repository into
 | `--mem <MiB>` | Memory in MiB when creating a new instance |
 | `--disk <GiB>` | Instance disk size when creating a new instance |
 | `--no-agents` | Skip injecting Claude Code and Codex credentials/config into the VM |
+| `--no-github` | Use `github = "off"` for this invocation and suppress the PAT setup prompt. See [scope and limitations](configuration.md#github-auth). |
 | `--image <name>` | Named image to use when creating a new instance (default: `default`) |
 | `--profile <list>` | Build or reuse a profile-derived image when creating a new instance, named from the sorted profiles (for example `node-python`) |
 | `--exclude-git` | Skip `.git/` when copying/syncing local directories; does not strip `.git` from a `--git-repo` clone |
@@ -245,6 +246,7 @@ instances, pass the instance name.
 | `NAME` | Stopped instance name (optional only when exactly one stopped instance exists) |
 | `--workspace <dir>` | Restart the stopped instance associated with this project path |
 | `--no-agents` | Skip injecting Claude Code and Codex credentials/config into the VM |
+| `--no-github` | Use `github = "off"` for this invocation and suppress the PAT setup prompt. See [scope and limitations](configuration.md#github-auth). |
 | `--forward-port <spec>` | Forward a guest port to the host (`GUEST[:HOST]`, repeatable). Lives for the lifetime of the VM; torn down on `coop stop`. |
 | `--no-prompt` | Suppress the interactive prompt to set up a scoped GitHub PAT when one is missing for the resolved repo (see [`coop github setup-pat`](#github)). |
 | `--post-start <cmd>` | Shell command to run inside the guest after boot. Overrides the `post_start` field in `config.toml`. Failure is logged but does not fail the start. |
@@ -264,6 +266,7 @@ rules, and recreate guidance.
 coop start
 coop start my-project
 coop start my-project --no-agents
+coop start my-project --no-github
 coop start --env RUST_LOG=info --env MY_FLAG=1
 coop start --forward-port 3000 --forward-port 8080:18080
 ```

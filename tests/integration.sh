@@ -1816,6 +1816,117 @@ CFGEOF
     env -u GITHUB_TOKEN -u ANTHROPIC_API_KEY "$BINARY" --config "$cfg_file" destroy "$pat_instance" 2>/dev/null || true
 }
 
+# Capture the boot session in post_start: a later `exec printenv` resolves
+# credentials again and would not test the invocation-only boot override.
+test_no_github() {
+    echo ""
+    echo "=== Phase: --no-github invocation override ==="
+
+    local inst_name="${INSTANCE}-no-gh"
+    local cfg_file="$tmpdir/no-github.toml"
+    local ws_dir="$tmpdir/no-github-workspace"
+    local observe_cfg="$tmpdir/no-github-observe.toml"
+    printf 'github = "off"\n' > "$observe_cfg"
+    mkdir -p "$ws_dir"
+    if ! (cd "$ws_dir" && git init --quiet &&
+        git remote add origin https://github.com/trailofbits/coop.git); then
+        fail "no-github: create workspace with matching PAT origin"
+        return
+    fi
+
+    ng() {
+        local rc=0
+        HARNESS_OUT=$(env -u CLAUDE_CODE_OAUTH_TOKEN \
+            GITHUB_TOKEN=coop-test-github ANTHROPIC_API_KEY=coop-test-claude \
+            OPENAI_API_KEY=coop-test-codex \
+            "$BINARY" --config "$cfg_file" "$@" 2>"$tmpdir/stderr") || rc=$?
+        HARNESS_ERR=$(cat "$tmpdir/stderr")
+        return "$rc"
+    }
+
+    STARTED_INSTANCES+=("$inst_name")
+    local stage expected probe
+    local boot_args=()
+    for stage in fresh-up plain-start flagged-start pat-up; do
+        cat > "$cfg_file" <<'CFGEOF'
+github = "env"
+[claude]
+config_dir = false
+[codex]
+config_dir = false
+CFGEOF
+        expected=absent
+        case "$stage" in
+            fresh-up)
+                boot_args=(up "$ws_dir" --name "$inst_name" --no-devcontainer --no-github)
+                ;;
+            plain-start)
+                boot_args=(start "$inst_name")
+                expected=coop-test-github
+                ;;
+            flagged-start)
+                boot_args=(start "$inst_name" --no-github)
+                ;;
+            pat-up)
+                cat > "$cfg_file" <<'CFGEOF'
+[github]
+mode = "pat"
+[github.pat."trailofbits/coop"]
+token = "cmd:exit 42"
+[claude]
+config_dir = false
+[codex]
+config_dir = false
+CFGEOF
+                boot_args=(up "$ws_dir" --no-github)
+                ;;
+        esac
+        cp "$cfg_file" "$cfg_file.before"
+        # Each boot writes its own stage name, so a stale probe cannot pass.
+        local hook="umask 077; printf '%s\\n' '$stage'"
+        hook+=' "${GITHUB_TOKEN-absent}" "$ANTHROPIC_API_KEY" "$OPENAI_API_KEY" > ~/.coop-no-github-probe'
+        if ! ng "${boot_args[@]}" --post-start "$hook"; then
+            fail "no-github: $stage boots" "$HARNESS_ERR"
+            break
+        fi
+        if HARNESS_OUT=$(env -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
+            -u CLAUDE_CODE_OAUTH_TOKEN "$BINARY" --config "$observe_cfg" \
+            exec "$inst_name" -- cat .coop-no-github-probe 2>"$tmpdir/stderr"); then
+            probe=$(printf '%s\n' "$stage" "$expected" coop-test-claude coop-test-codex)
+            if [[ "$HARNESS_OUT" == "$probe" ]]; then
+                pass "no-github: $stage captures expected GitHub and model credentials"
+            else
+                fail "no-github: $stage captures expected GitHub and model credentials"
+            fi
+        else
+            fail "no-github: $stage reads boot-session probe" "$(cat "$tmpdir/stderr")"
+        fi
+        if cmp -s "$cfg_file" "$cfg_file.before"; then
+            pass "no-github: $stage leaves config unchanged"
+        else
+            fail "no-github: $stage leaves config unchanged"
+        fi
+        if [[ "$stage" == fresh-up ]]; then
+            if ng up "$ws_dir" --no-github; then
+                fail "no-github: running up rejects the override"
+            elif [[ "$HARNESS_ERR" == *"already running"* && "$HARNESS_ERR" == *"--no-github"* ]]; then
+                pass "no-github: running up rejects the override"
+            else
+                fail "no-github: running up rejects the override" "$HARNESS_ERR"
+            fi
+        fi
+        if ! ng stop "$inst_name"; then
+            fail "no-github: $stage stops" "$HARNESS_ERR"
+            break
+        fi
+    done
+    if ng destroy "$inst_name"; then
+        untrack_instance "$inst_name"
+    else
+        fail "no-github: destroy test instance" "$HARNESS_ERR"
+    fi
+}
+
 test_term_handling() {
     echo ""
     echo "=== Phase: TERM handling ==="
@@ -6560,6 +6671,7 @@ main() {
 
         # github = "pat" mode + per-repo token forwarding (uses a stub image)
         test_github_pat_forwarding
+        test_no_github
 
         # Config sources: CLAUDE.md + rules copy
         test_config_dir
