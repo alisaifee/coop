@@ -5128,6 +5128,16 @@ url = "https://example.com/m"
     }
 
     #[test]
+    fn merge_workspace_folder_trust_preserves_other_folders() {
+        let existing = "[folders.\"/tmp\"]\ntrusted = true\n";
+        let merged = merge_workspace_folder_trust(existing).unwrap();
+        let table: toml::Table = merged.parse().unwrap();
+        let folders = table["folders"].as_table().unwrap();
+        assert_eq!(folders["/tmp"]["trusted"].as_bool(), Some(true));
+        assert_eq!(folders["/workspace"]["trusted"].as_bool(), Some(true));
+    }
+
+    #[test]
     fn merge_workspace_folder_trust_rejects_invalid_toml() {
         assert!(merge_workspace_folder_trust("not toml").is_err());
         assert!(

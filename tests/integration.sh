@@ -1091,6 +1091,77 @@ test_grok_bin_path() {
     fi
 }
 
+test_grok_settings_merge() {
+    echo ""
+    echo "=== Phase: grok settings merge across restart ==="
+
+    # Seed a non-managed ui key, a wrong permission_mode, a host-style
+    # [plugins] table, and a trusted folder other than /workspace. Bootstrap
+    # on restart must reapply always-approve, drop [plugins], record
+    # /workspace, and keep the rest.
+    local seed='mkdir -p ~/.grok && printf "%s\n" '
+    seed+='"[ui]" "vim_mode = true" "permission_mode = \"default\"" "" '
+    seed+='"[plugins]" "sentinel = true" > ~/.grok/config.toml && '
+    seed+='printf "%s\n" "[folders.\"/tmp\"]" "trusted = true" '
+    seed+='> ~/.grok/trusted_folders.toml'
+    if coop_exec sh -c "$seed"; then
+        pass "seed grok config and trust files"
+    else
+        fail "seed grok config and trust files" "stderr: $(guest_stderr)"
+        return
+    fi
+
+    coop stop "$INSTANCE" || true
+    if coop start "$INSTANCE"; then
+        pass "restart for grok settings merge exits 0"
+    else
+        fail "restart for grok settings merge exits 0" "stderr: $HARNESS_ERR"
+        return
+    fi
+
+    local merged
+    if ! merged=$(coop_exec sh -c 'cat ~/.grok/config.toml'); then
+        fail "read merged config.toml after restart" "stderr: $(guest_stderr)"
+        return
+    fi
+
+    if echo "$merged" | grep -q 'vim_mode = true'; then
+        pass "non-managed grok ui key survives restart"
+    else
+        fail "non-managed grok ui key survives restart" "$merged"
+    fi
+
+    if echo "$merged" | grep -q 'always-approve'; then
+        pass "managed grok permission_mode reapplied after restart"
+    else
+        fail "managed grok permission_mode reapplied after restart" "$merged"
+    fi
+
+    if echo "$merged" | grep -q sentinel; then
+        fail "host [plugins] table dropped after restart" "$merged"
+    else
+        pass "host [plugins] table dropped after restart"
+    fi
+
+    local trust
+    if ! trust=$(coop_exec sh -c 'cat ~/.grok/trusted_folders.toml'); then
+        fail "read trusted_folders.toml after restart" "stderr: $(guest_stderr)"
+        return
+    fi
+
+    if echo "$trust" | grep -q '/workspace'; then
+        pass "/workspace recorded in trusted_folders.toml"
+    else
+        fail "/workspace recorded in trusted_folders.toml" "$trust"
+    fi
+
+    if echo "$trust" | grep -q '/tmp'; then
+        pass "existing trusted folder survives restart"
+    else
+        fail "existing trusted folder survives restart" "$trust"
+    fi
+}
+
 test_claude_settings_merge() {
     echo ""
     echo "=== Phase: claude settings merge across restart ==="
@@ -1566,10 +1637,11 @@ test_agent_update() {
 
     if coop agent update "$INSTANCE" --check; then
         if echo "$HARNESS_OUT" | grep -q "Claude Code" \
-            && echo "$HARNESS_OUT" | grep -q "Codex"; then
-            pass "agent update --check reports both agents"
+            && echo "$HARNESS_OUT" | grep -q "Codex" \
+            && echo "$HARNESS_OUT" | grep -q "Grok Build"; then
+            pass "agent update --check reports all agents"
         else
-            fail "agent update --check reports both agents" "out: $HARNESS_OUT"
+            fail "agent update --check reports all agents" "out: $HARNESS_OUT"
         fi
     else
         fail "agent update --check exits 0" "exit: $? stderr: $HARNESS_ERR"
@@ -6557,6 +6629,7 @@ main() {
     test_exec
     test_claude_bin_path
     test_grok_bin_path
+    test_grok_settings_merge
     test_claude_settings_merge
     test_claude_onboarding_seed
     test_codex_bin_path

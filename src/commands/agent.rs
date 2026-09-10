@@ -668,6 +668,20 @@ mod tests {
     }
 
     #[test]
+    fn check_line_auto_updates_names_grok_build() {
+        let row = CheckRow {
+            agent: Agent::Grok,
+            installed: Some(ver("1.0.24")),
+            latest: None,
+            status: CheckStatus::AutoUpdates,
+        };
+        let line = check_line(&row);
+        assert!(line.contains("Grok Build"), "{line}");
+        assert!(line.contains("1.0.24"), "{line}");
+        assert!(line.contains("auto-updates in background"), "{line}");
+    }
+
+    #[test]
     fn check_line_unknown_shows_placeholder() {
         let row = CheckRow {
             agent: Agent::Codex,
@@ -695,8 +709,18 @@ mod tests {
                 latest: Some(ver("0.5.0")),
                 status: CheckStatus::UpdateAvailable,
             },
+            CheckRow {
+                agent: Agent::Grok,
+                installed: Some(ver("1.0.24")),
+                latest: None,
+                status: CheckStatus::AutoUpdates,
+            },
         ];
-        assert_eq!(check_report(&rows).len(), 2);
+        let lines = check_report(&rows);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("Claude Code"), "{}", lines[0]);
+        assert!(lines[1].contains("Codex"), "{}", lines[1]);
+        assert!(lines[2].contains("Grok Build"), "{}", lines[2]);
     }
 
     // ── outcome lines ──────────────────────────────────────────
