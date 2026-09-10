@@ -1095,10 +1095,10 @@ test_grok_settings_merge() {
     echo ""
     echo "=== Phase: grok settings merge across restart ==="
 
-    # Seed a non-managed ui key, a wrong permission_mode, a host-style
-    # [plugins] table, and a trusted folder other than /workspace. Bootstrap
-    # on restart must reapply always-approve, drop [plugins], record
-    # /workspace, and keep the rest.
+    # Host ~/.grok/config.toml is recopied every boot, then managed keys
+    # are merged into that copy. Seed a wrong permission_mode and a host-
+    # style [plugins] table so restart proves the merge. trusted_folders.toml
+    # is not copied from the host, so a guest /tmp entry must survive.
     local seed='mkdir -p ~/.grok && printf "%s\n" '
     seed+='"[ui]" "vim_mode = true" "permission_mode = \"default\"" "" '
     seed+='"[plugins]" "sentinel = true" > ~/.grok/config.toml && '
@@ -1123,12 +1123,6 @@ test_grok_settings_merge() {
     if ! merged=$(coop_exec sh -c 'cat ~/.grok/config.toml'); then
         fail "read merged config.toml after restart" "stderr: $(guest_stderr)"
         return
-    fi
-
-    if echo "$merged" | grep -q 'vim_mode = true'; then
-        pass "non-managed grok ui key survives restart"
-    else
-        fail "non-managed grok ui key survives restart" "$merged"
     fi
 
     if echo "$merged" | grep -q 'always-approve'; then

@@ -2334,6 +2334,12 @@ fn copy_staged_to_guest(
         let path = entry.path();
         let local = HostPath::new(&path);
         if path.is_dir() {
+            // A previous boot may have copied read-only files (git packs).
+            // scp cannot overwrite those; replace the dest directory first.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let dest = format!("~/{guest_subdir}/{name}");
+                target.exec(RemoteCommand::new().literal("rm -rf -- ").arg(&dest))?;
+            }
             target
                 .scp_to_recursive(&local, &guest_dir)
                 .with_context(|| format!("Failed to copy {} to guest", path.display()))?;
@@ -3195,6 +3201,19 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if meta.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
+            if dst_path.exists() {
+                let mut perms = std::fs::metadata(&dst_path)
+                    .with_context(|| format!("Failed to stat {}", dst_path.display()))?
+                    .permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    perms.set_mode(perms.mode() | 0o200);
+                }
+                std::fs::set_permissions(&dst_path, perms).with_context(|| {
+                    format!("Failed to make {} owner-writable", dst_path.display())
+                })?;
+            }
             std::fs::copy(&src_path, &dst_path).with_context(|| {
                 format!(
                     "Failed to copy {} -> {}",
@@ -3619,6 +3638,7 @@ fn gh_auth_token() -> Option<String> {
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     const SAMPLE_OUTPUT: &str = "\
 0.12 0.08 0.03 1/42 1234
@@ -5182,6 +5202,26 @@ url = "https://example.com/m"
             std::fs::read_to_string(target.join("b/c.txt")).unwrap(),
             "nested"
         );
+    }
+
+    #[test]
+    fn copy_dir_recursive_overwrites_readonly_file() {
+        let src1 = tempfile::TempDir::new().unwrap();
+        std::fs::write(src1.path().join("pack"), b"v1").unwrap();
+        let mut perms = std::fs::metadata(src1.path().join("pack"))
+            .unwrap()
+            .permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(src1.path().join("pack"), perms).unwrap();
+
+        let dst = tempfile::TempDir::new().unwrap();
+        let target = dst.path().join("out");
+        copy_dir_recursive(src1.path(), &target).unwrap();
+
+        let src2 = tempfile::TempDir::new().unwrap();
+        std::fs::write(src2.path().join("pack"), b"v2").unwrap();
+        copy_dir_recursive(src2.path(), &target).unwrap();
+        assert_eq!(std::fs::read(target.join("pack")).unwrap(), b"v2");
     }
 
     #[test]
