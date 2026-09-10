@@ -38,6 +38,11 @@ guest environment → docker → stop → destroy). CI additionally runs the fas
 host-only `tests/integration-install.sh`, `tests/integration-update.sh`, and
 `tests/integration-uninstall.sh` suites.
 
+The `--full` suite includes a dedicated `--no-github` phase. It captures the
+boot session through `post_start` for fresh `up`, `start`, and a stopped-project
+`up`, checks that model credentials still arrive, and witnesses normal GitHub
+forwarding on an intervening invocation without the flag.
+
 When adding new features, consider whether they should be covered here. New
 commands or guest-visible changes are good candidates for a new test phase.
 
