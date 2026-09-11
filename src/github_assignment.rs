@@ -292,6 +292,22 @@ mod tests {
         assert!(active(&cfg, &inst).is_err());
         Assignment::remove(&inst).unwrap();
         assert!(Assignment::load(&inst).unwrap().is_none());
+
+        let target = inst.dir.join("valid-assignment.json");
+        std::fs::write(&target, r#"{"repo":"org/assigned"}"#).unwrap();
+        std::os::unix::fs::symlink(&target, inst.dir.join("github_pat.json")).unwrap();
+        assert!(Assignment::load(&inst).is_err());
+        Assignment::remove(&inst).unwrap();
+        assert!(
+            target.is_file(),
+            "removal must unlink the association, not its target"
+        );
+
+        let regular_file = inst.dir.join("not-a-directory");
+        std::fs::write(&regular_file, "file").unwrap();
+        let mut invalid_parent = inst.clone();
+        invalid_parent.dir = regular_file.join("child");
+        assert!(Assignment::load(&invalid_parent).is_err());
     }
 
     #[test]
