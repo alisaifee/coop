@@ -685,6 +685,10 @@ impl<'de> Deserialize<'de> for ConfigPath {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoopConfig {
+    /// Invocation-only opt-out; never persisted.
+    #[serde(skip)]
+    pub github_disabled: bool,
+
     /// Directory for storing VM artifacts (images, sockets, logs)
     #[serde(default = "default_data_dir")]
     pub data_dir: ConfigPath,
@@ -2360,6 +2364,7 @@ impl Default for CoopConfig {
             ssh_port: default_ssh_port(),
             firecracker_bin: default_firecracker_bin(),
             github: None,
+            github_disabled: false,
             setup: SetupConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),

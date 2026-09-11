@@ -14,6 +14,7 @@ mod devcontainer;
 mod devcontainer_oci;
 mod fs_util;
 mod git_repo_devcontainer;
+mod github_assignment;
 mod github_pat;
 pub mod github_repo;
 mod github_submodules;
@@ -644,7 +645,7 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ProfilesAction>,
     },
-    /// Manage GitHub authentication (fine-grained PAT wizard, status, rotate, forget)
+    /// Manage GitHub PAT entries and VM assignments
     Github {
         #[command(subcommand)]
         action: GithubAction,
@@ -782,6 +783,29 @@ enum ProfilesAction {
 
 #[derive(Subcommand)]
 enum GithubAction {
+    /// Select an existing stored PAT entry for subsequent VM sessions
+    AssignPat {
+        #[arg(
+            long,
+            value_name = "NAME",
+            value_parser = config::InstanceName::new,
+            add = ArgValueCandidates::new(completions::instance_candidates)
+        )]
+        vm: config::InstanceName,
+        /// Stored entry key, not the workspace or the token's permission scope
+        #[arg(long, value_parser = github_repo::RepoSlug::parse_cli)]
+        repo: github_repo::RepoSlug,
+    },
+    /// Remove only the VM association; keep the shared stored credential
+    UnassignPat {
+        #[arg(
+            long,
+            value_name = "NAME",
+            value_parser = config::InstanceName::new,
+            add = ArgValueCandidates::new(completions::instance_candidates)
+        )]
+        vm: config::InstanceName,
+    },
     /// Run the fine-grained PAT wizard for a repo
     SetupPat {
         /// Repo slug to scope to (auto-detected if omitted)
@@ -796,6 +820,14 @@ enum GithubAction {
     },
     /// Print configured PAT entries and their validation state
     Status {
+        /// Also show this VM's assigned entry and effective selection source
+        #[arg(
+            long,
+            value_name = "NAME",
+            value_parser = config::InstanceName::new,
+            add = ArgValueCandidates::new(completions::instance_candidates)
+        )]
+        vm: Option<config::InstanceName>,
         /// Resolve each entry's `cmd:` invocation (may trigger Keychain /
         /// 1Password prompts) to confirm the secret store still serves it.
         #[arg(long)]
@@ -903,6 +935,7 @@ impl Commands {
                 ..
             }
         ) {
+            cfg.github_disabled = true;
             cfg.github = Some(config::GitHubAuth::Off);
             // Off alone is eligible for the PAT wizard, which can replace
             // cfg.github after writing a new credential to the config file.
@@ -1546,6 +1579,51 @@ mod tests {
     }
 
     #[test]
+    fn github_assignment_cli_requires_valid_vm_and_entry() {
+        let cli = parse(&[
+            "github",
+            "assign-pat",
+            "--vm",
+            "projects",
+            "--repo",
+            "org/entry",
+        ]);
+        let crate::Commands::Github {
+            action: crate::GithubAction::AssignPat { vm, repo },
+        } = cli.command
+        else {
+            panic!("expected assignment")
+        };
+        assert_eq!(vm.as_str(), "projects");
+        assert_eq!(repo.as_str(), "org/entry");
+        for args in [
+            vec!["coop", "github", "assign-pat", "--repo", "org/entry"],
+            vec!["coop", "github", "assign-pat", "--vm", "projects"],
+            vec![
+                "coop",
+                "github",
+                "assign-pat",
+                "--vm",
+                "../escape",
+                "--repo",
+                "org/entry",
+            ],
+            vec![
+                "coop",
+                "github",
+                "assign-pat",
+                "--vm",
+                "projects",
+                "--repo",
+                "bad",
+            ],
+            vec!["coop", "github", "unassign-pat"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
     fn no_github_overrides_each_mode_without_changing_other_settings() {
         use crate::config::{CoopConfig, GitHubAuth};
         use crate::pat_prompt::{Decision, PromptContext};
@@ -1577,6 +1655,7 @@ mod tests {
                 }
                 cli.command.apply_github_override(&mut cfg);
                 assert!(matches!(cfg.github, Some(GitHubAuth::Off)));
+                assert!(cfg.github_disabled);
                 assert_eq!(
                     Decision::resolve(
                         &cfg,

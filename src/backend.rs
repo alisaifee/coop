@@ -1985,7 +1985,7 @@ fn resolve_github_token(
 
 /// Look up a `[github.pat."repo"]` entry and resolve its `token` via
 /// the `cmd:` indirection.
-fn resolve_pat_token(
+pub(crate) fn resolve_pat_token(
     strategy: Option<&GitHubAuth>,
     repo: &crate::github_repo::RepoSlug,
 ) -> Result<String> {
@@ -3076,8 +3076,10 @@ fn register_mcp_servers(
 ///
 /// For GitHub HTTPS URLs, resolves a token on the host and forwards it to
 /// git in the guest via stdin and a one-shot credential helper. Token
-/// resolution honours the configured GitHub strategy:
+/// resolution honours VM assignment before the configured GitHub strategy:
 ///
+/// - An active VM assignment selects its stored entry independently of the
+///   clone URL. Missing entries and retrieval failures return an error.
 /// - `github = "pat"` with a matching `[github.pat."owner/repo"]` entry
 ///   uses the configured PAT. This is the user's explicit per-repo intent,
 ///   so it takes precedence over the host-side fallback. If the entry's
@@ -3095,12 +3097,13 @@ pub fn clone_git_repo(
     target: &SshTarget,
     github: Option<&GitHubAuth>,
     repo_url: &str,
+    assigned: Option<&crate::github_repo::RepoSlug>,
 ) -> Result<()> {
     tracing::info!("Cloning {repo_url} into guest /workspace");
 
     let is_github = is_github_https_url(repo_url);
     let token = if is_github {
-        resolve_clone_token(github, repo_url)?
+        resolve_clone_token(github, repo_url, assigned)?
     } else {
         None
     };
@@ -3133,7 +3136,7 @@ pub fn clone_git_repo(
 /// If `strategy` is `Pat` mode and a `[github.pat."owner/repo"]` entry
 /// exists for `repo_url`, return the matching slug. Otherwise `None`.
 ///
-/// This is the sole "should the clone path use a configured PAT?" check.
+/// Without a VM assignment, this selects a configured PAT for cloning.
 /// Returning `None` directs [`resolve_clone_token`] to fall through to
 /// [`host_github_token`] — preserving the pre-PAT behaviour for `Auto`,
 /// `Env`, `Off`, and `Pat`-without-a-matching-entry.
@@ -3151,11 +3154,19 @@ fn clone_pat_slug(
 
 /// Resolve the token to use for `git clone` of `repo_url`.
 ///
-/// PAT mode with a matching entry wins — the user's per-repo intent
+/// An active VM assignment wins and fails closed on lookup/retrieval errors.
+/// Otherwise PAT mode with a matching entry wins — the user's per-repo intent
 /// overrides the opportunistic host lookup. Every other configuration
 /// (including `Pat` mode without a matching entry) falls back to
 /// [`host_github_token`].
-fn resolve_clone_token(strategy: Option<&GitHubAuth>, repo_url: &str) -> Result<Option<String>> {
+fn resolve_clone_token(
+    strategy: Option<&GitHubAuth>,
+    repo_url: &str,
+    assigned: Option<&crate::github_repo::RepoSlug>,
+) -> Result<Option<String>> {
+    if let Some(repo) = assigned {
+        return resolve_pat_token(strategy, repo).map(Some);
+    }
     if let Some(slug) = clone_pat_slug(strategy, repo_url) {
         return resolve_pat_token(strategy, &slug).map(Some);
     }
@@ -4791,8 +4802,32 @@ url = "https://example.com/m"
         // exists — the test for "PAT bypassed" is that it survives
         // independently of the host's environment.
         let auth = pat_auth_with(&[("owner/repo", "github_pat_literal")]);
-        let token = resolve_clone_token(Some(&auth), "https://github.com/owner/repo.git").unwrap();
+        let token =
+            resolve_clone_token(Some(&auth), "https://github.com/owner/repo.git", None).unwrap();
         assert_eq!(token.as_deref(), Some("github_pat_literal"));
+    }
+
+    #[test]
+    fn assigned_clone_selection_never_falls_back() {
+        let assigned = crate::github_repo::RepoSlug::new("owner/assigned").unwrap();
+        let url = "https://github.com/owner/repo.git";
+        let auth = pat_auth_with(&[
+            ("owner/repo", "github_pat_default"),
+            ("owner/assigned", "github_pat_selected"),
+        ]);
+        assert_eq!(
+            resolve_clone_token(Some(&auth), url, Some(&assigned))
+                .unwrap()
+                .as_deref(),
+            Some("github_pat_selected")
+        );
+        let missing = pat_auth_with(&[("owner/repo", "github_pat_default")]);
+        assert!(resolve_clone_token(Some(&missing), url, Some(&assigned)).is_err());
+        let failed = pat_auth_with(&[
+            ("owner/repo", "github_pat_default"),
+            ("owner/assigned", "cmd:exit 42"),
+        ]);
+        assert!(resolve_clone_token(Some(&failed), url, Some(&assigned)).is_err());
     }
 
     // ── EnvForward Debug redaction ──────────────────────────

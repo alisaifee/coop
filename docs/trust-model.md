@@ -88,7 +88,11 @@ user `env_forward` entries, and the VM SSH key. The invariants:
   `ps`/`/proc`. Known exceptions are the macOS `security` and 1Password `op`
   backends, which take the secret on argv because their CLIs offer no stdin
   path; this is documented at the call sites and limited to the store step.
-- **`GITHUB_TOKEN` defaults to Off.** It is only forwarded with an explicit
+- **`GITHUB_TOKEN` defaults to Off.** A saved VM PAT assignment is also explicit
+  opt-in; it stores only a validated existing entry key. Invocation-level
+  `--no-github` suppresses the assignment before loading it. Active assignments
+  reject both managed `GITHUB_TOKEN` and `GH_TOKEN` overrides and fail closed
+  on missing references or failed retrieval. It is only forwarded with an explicit
   `github = auto|env|pat` opt-in (`backend.rs:resolve_github_token`). When
   forwarded, `bootstrap_agents` runs `gh auth setup-git`, which makes the token
   **persistent guest state** (a git credential helper any guest process can

@@ -27,7 +27,7 @@ The `github` field determines how coop obtains a `GITHUB_TOKEN` for the guest:
 | `"auto"` | Checks `$GITHUB_TOKEN` first. Falls back to `gh auth token` if unset. |
 | `"env"` | Reads `$GITHUB_TOKEN` from the environment only. Warns if unset. |
 | `"off"` | No GitHub token forwarding. |
-| `"pat"` | Uses a per-repo fine-grained PAT recorded under `[github.pat]`. Scope is **server-enforced** to one repository. |
+| `"pat"` | Uses a per-repo fine-grained PAT recorded under `[github.pat]`. GitHub enforces the permissions and repositories selected for that token. |
 
 When a token is present, coop runs `gh auth setup-git` inside the guest to wire up git credential helpers.
 
@@ -105,10 +105,53 @@ Other subcommands:
 
 | Command | Effect |
 |---------|--------|
-| `coop github status` | List configured entries, storage backend, and whether each token still resolves. Never prints token material. |
+| `coop github status` | List configured entries and storage backend; add `--probe` to test retrieval. Never prints token material. |
 | `coop github rotate-pat --repo X/Y` | Re-run the wizard against an existing entry (PATs expire — max 1 year). |
 | `coop github forget-pat --repo X/Y` | Remove the stored secret and the `[github.pat."X/Y"]` entry. Does **not** add a skip marker; the token may still be live on GitHub. |
 | `coop validate --probe` | Resolves each entry and probes `GET /user` against api.github.com. May trigger Keychain authorization or a 1Password Touch-ID prompt the first time per session. |
+
+#### Assign an existing PAT to a VM
+
+```sh
+coop github assign-pat --vm projects --repo myorg/frontend
+coop github status --vm projects
+coop github unassign-pat --vm projects
+```
+
+`--repo` selects the **stored entry key**, not the workspace repository or the
+PAT's permission scope. For example, a token stored under `myorg/frontend`
+may also authorize `myorg/backend`; assigning it to a VM whose workspace is a
+plain parent directory works without detecting either child repository.
+Different VMs can select different entries for the same workspace.
+
+Assignment is explicit opt-in and takes precedence over workspace detection.
+Only the validated key is saved in owner-only, atomically written
+`<instance>/github_pat.json`; the shared secret is resolved again for each
+subsequent session or clone. Assignment works while the VM is stopped.
+Restart/bootstrap, shell, exec, agent sessions, and restore/reprovision use it.
+Existing shells, agents, and background processes are not updated. Restart
+without `--no-agents` to establish the git credential helper on a guest that
+has never had GitHub authentication bootstrapped.
+
+`up --no-github` and `start --no-github` suppress assignment use and the PAT
+setup prompt for that invocation, without removing the saved association.
+The existing separate clone fallback remains: under opt-out, a GitHub HTTPS
+clone may still use host credentials. Without an assignment, normal auth-mode
+and repository selection are unchanged.
+
+Missing entries, unreadable or malformed assignment state, and failed secret
+retrieval fail instead of falling back. Restore a forgotten entry with
+`setup-pat`, or remove the association with `unassign-pat`. Rotation affects
+subsequent resolutions. Unassigning restores normal selection and neither
+deletes the shared secret nor revokes it on GitHub. Destroying the VM removes
+its association with the VM state, leaving the shared PAT intact.
+
+An active assignment rejects managed `GITHUB_TOKEN` **and** `GH_TOKEN` entries
+in `[guest_env]`, either agent's `env_forward`, or persisted `--env` /
+`containerEnv` overrides. Remove these conflicting entries, including saved
+keys in `<instance>/guest_env.json`, or unassign the PAT. This controls coop's
+delivery; the guest can still change its own environment. The VM receives the
+token's actual authority over every repository it covers.
 
 #### Auto-prompt at VM startup
 
