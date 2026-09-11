@@ -1090,7 +1090,9 @@ fn restart_instance(
     // Pre-flight: same auto-prompt as a fresh start. Uses the instance's
     // recorded workspace-state to recover the repo slug.
     let repo = backend::detect_instance_repo(inst);
-    pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    if crate::github_assignment::active(cfg, inst)?.is_none() {
+        pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    }
 
     // Re-apply the forward set the instance was last started with.
     // CLI `--forward-port` on a restart appends/overrides; otherwise the
@@ -1116,6 +1118,7 @@ fn restart_instance(
         cfg.guest_env.insert(key.clone(), value.clone());
     }
 
+    crate::github_assignment::active(cfg, inst)?;
     be.start_existing(cfg, inst)?;
 
     signal::check_shutdown()?;
@@ -1205,7 +1208,9 @@ fn start_instance(
     // can fire before any VM cost is incurred, and so pat-mode token
     // forwarding works at bootstrap time.
     let repo = resolve_start_repo(opts)?;
-    pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    if crate::github_assignment::active(cfg, inst)?.is_none() {
+        pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    }
 
     // Forwards are checked up-front so an in-use host port fails fast,
     // before any VM cost is incurred. The actual `-L` tunnels are
@@ -1322,7 +1327,13 @@ fn provision_first_boot(
         state.save(inst)?;
         Some(state)
     } else if let Some(repo_url) = opts.git_repo {
-        backend::clone_git_repo(&target, cfg.github.as_ref(), repo_url)?;
+        let assignment = crate::github_assignment::active(cfg, inst)?;
+        backend::clone_git_repo(
+            &target,
+            cfg.github.as_ref(),
+            repo_url,
+            assignment.as_ref().map(|a| &a.repo),
+        )?;
 
         let state = workspace::WorkspaceState {
             guest_path: workspace::default_workspace_path(),
@@ -1597,6 +1608,9 @@ fn bootstrap_and_post_start(
         tracing::warn!("{}", NO_AGENTS_CHATGPT_WARNING);
     }
     if opts.no_agents && post_start.is_none() {
+        if let Some(assignment) = crate::github_assignment::active(cfg, inst)? {
+            backend::resolve_pat_token(cfg.github.as_ref(), &assignment.repo)?;
+        }
         tracing::info!("Skipping guest agent bootstrap (--no-agents)");
         return Ok(());
     }
@@ -1699,6 +1713,11 @@ pub(crate) fn prepare_session_from_target(
         tracing::warn!("{}", backend::codex_chatgpt_proxy_conflict_message());
     }
 
+    let assignment = inst
+        .map(|inst| crate::github_assignment::active(cfg, inst))
+        .transpose()?
+        .flatten();
+    let repo = assignment.as_ref().map(|a| &a.repo).or(repo);
     let mut env = backend::prepare_env_forwarding(cfg, repo, proxy_anthropic, suppress_openai_key)?;
     if let Some(inst) = inst {
         if let Some(state) = guest_env_state::GuestEnvState::try_load(inst)? {
@@ -2187,7 +2206,9 @@ fn reprovision_instance(
     // reason `start_instance` fires it before any VM cost: an interactive
     // wizard should not appear with the guest already wiped.
     let repo = backend::detect_instance_repo(&inst);
-    pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    if crate::github_assignment::active(cfg, &inst)?.is_none() {
+        pat_prompt::maybe_prompt(cfg, opts.config_path, repo.as_ref(), opts.no_prompt)?;
+    }
 
     // Installed before the stop, so a Ctrl-C during it is handled too.
     let _guard = signal::install_handlers();

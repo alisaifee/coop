@@ -36,6 +36,7 @@ coop/
 │   ├── model_state.rs      # per-instance local/remote model routing
 │   ├── secret_store.rs     # pluggable secret backends (keychain/op/secret-tool/file)
 │   ├── github_pat.rs       # `coop github` PAT wizard (setup/rotate/status/forget)
+│   ├── github_assignment.rs # persistent VM selection of an existing PAT entry
 │   ├── github_repo.rs      # RepoSlug + repo-URL parsing
 │   ├── github_submodules.rs# submodule discovery for PAT scoping
 │   ├── pat_prompt.rs       # interactive pre-start PAT prompt

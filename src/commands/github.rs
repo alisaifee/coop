@@ -23,7 +23,21 @@ pub(crate) fn cmd_github(
             };
             github_pat::run_rotate_pat(cfg, &opts)
         }
-        GithubAction::Status { probe, json } => github_pat::run_status(cfg, probe, json),
+        GithubAction::AssignPat { vm, repo } => {
+            let inst = cfg.resolve_instance(Some(&vm))?;
+            crate::github_assignment::Assignment { repo }.save(cfg, &inst)
+        }
+        GithubAction::UnassignPat { vm } => {
+            let inst = cfg.resolve_instance(Some(&vm))?;
+            crate::github_assignment::Assignment::remove(&inst)
+        }
+        GithubAction::Status { probe, json, vm } => {
+            let inst = vm
+                .as_ref()
+                .map(|name| cfg.resolve_instance(Some(name)))
+                .transpose()?;
+            github_pat::run_status(cfg, probe, json, inst.as_ref())
+        }
         GithubAction::ForgetPat { repo } => github_pat::run_forget_pat(cfg, &repo, config_path),
     }
 }

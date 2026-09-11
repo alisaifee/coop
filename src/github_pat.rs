@@ -104,8 +104,14 @@ pub fn run_rotate_pat(cfg: &CoopConfig, opts: &SetupOpts<'_>) -> Result<()> {
 /// printed. When `probe` is true, each `cmd:` invocation is resolved to
 /// confirm the secret store still serves it — this may trigger a
 /// Keychain dialog / `op` Touch-ID prompt per entry, so it is opt-in.
-pub fn run_status(cfg: &CoopConfig, probe: bool, json_out: bool) -> Result<()> {
-    let view = build_status(cfg, probe);
+pub fn run_status(
+    cfg: &CoopConfig,
+    probe: bool,
+    json_out: bool,
+    inst: Option<&crate::config::Instance>,
+) -> Result<()> {
+    let mut view = build_status(cfg, probe);
+    view.vm = inst.map(|inst| build_vm_status(cfg, inst)).transpose()?;
     if json_out {
         return json::render_json(&view);
     }
@@ -180,6 +186,8 @@ impl ProbeStatus {
 /// repo, storage backend, and (opt-in) probe result.
 #[derive(serde::Serialize)]
 pub(crate) struct GithubStatus<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vm: Option<VmPatStatus>,
     pub mode: GithubMode,
     pub entries: Vec<PatEntryView<'a>>,
     pub skip: Vec<&'a RepoSlug>,
@@ -222,6 +230,7 @@ fn build_status(cfg: &CoopConfig, probe: bool) -> GithubStatus<'_> {
         _ => (Vec::new(), Vec::new()),
     };
     GithubStatus {
+        vm: None,
         mode,
         entries,
         skip,
@@ -232,6 +241,22 @@ fn build_status(cfg: &CoopConfig, probe: bool) -> GithubStatus<'_> {
 fn format_status(view: &GithubStatus<'_>) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
+    if let Some(vm) = &view.vm {
+        let _ = writeln!(
+            s,
+            "VM {}: selection {:?}; assigned entry: {}",
+            vm.name,
+            vm.source,
+            vm.assigned_entry.as_ref().map_or("none", RepoSlug::as_str)
+        );
+        if vm.source == SelectionSource::MissingAssignment {
+            let _ = writeln!(
+                s,
+                "  Assigned entry unavailable: restore it with setup-pat or use unassign-pat --vm {}",
+                vm.name
+            );
+        }
+    }
     if view.mode != GithubMode::Pat {
         let _ = writeln!(s, "github mode: {} (no PAT entries)", view.mode.label());
         return s;
@@ -258,6 +283,66 @@ fn format_status(view: &GithubStatus<'_>) -> String {
         }
     }
     s
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SelectionSource {
+    Assignment,
+    MissingAssignment,
+    Repository,
+    Auto,
+    Env,
+    Off,
+    NoMatchingEntry,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct VmPatStatus {
+    name: String,
+    assigned_entry: Option<RepoSlug>,
+    source: SelectionSource,
+}
+
+fn build_vm_status(cfg: &CoopConfig, inst: &crate::config::Instance) -> Result<VmPatStatus> {
+    let assignment = crate::github_assignment::Assignment::load(inst)?;
+    let repo = if assignment.is_none() {
+        crate::backend::detect_instance_repo(inst)
+    } else {
+        None
+    };
+    let source = selection_source(cfg, assignment.as_ref(), repo.as_ref());
+    Ok(VmPatStatus {
+        name: inst.name.to_string(),
+        assigned_entry: assignment.map(|a| a.repo),
+        source,
+    })
+}
+
+fn selection_source(
+    cfg: &CoopConfig,
+    assignment: Option<&crate::github_assignment::Assignment>,
+    repo: Option<&RepoSlug>,
+) -> SelectionSource {
+    if let Some(assignment) = assignment {
+        return if assignment.available(cfg) {
+            SelectionSource::Assignment
+        } else {
+            SelectionSource::MissingAssignment
+        };
+    }
+    match cfg.github.as_ref() {
+        Some(GitHubAuth::Auto) => SelectionSource::Auto,
+        Some(GitHubAuth::Env) => SelectionSource::Env,
+        Some(GitHubAuth::Pat(auth)) => {
+            if repo.is_some_and(|repo| auth.entries.contains_key(repo)) {
+                SelectionSource::Repository
+            } else {
+                SelectionSource::NoMatchingEntry
+            }
+        }
+        _ => SelectionSource::Off,
+    }
 }
 
 /// `coop github forget-pat --repo owner/name` — remove the secret and
@@ -1139,6 +1224,86 @@ mod tests {
 
     fn slug(s: &str) -> RepoSlug {
         RepoSlug::new(s).unwrap()
+    }
+
+    #[test]
+    fn vm_assignment_status_keeps_entry_listing_and_reports_missing_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: CoopConfig = toml::from_str(
+            r#"
+            [github]
+            mode = "pat"
+            [github.pat."org/entry"]
+            token = "github_pat_never_print"
+        "#,
+        )
+        .unwrap();
+        cfg.data_dir = crate::config::ConfigPath::new(tmp.path());
+        let inst = cfg
+            .allocate_instance(
+                Some(&crate::config::InstanceName::new("projects").unwrap()),
+                &crate::config::ImageName::new("default").unwrap(),
+                None,
+            )
+            .unwrap();
+        let assignment = crate::github_assignment::Assignment {
+            repo: RepoSlug::new("org/entry").unwrap(),
+        };
+        assignment.save(&cfg, &inst).unwrap();
+        assert_eq!(
+            selection_source(&cfg, None, Some(&assignment.repo)),
+            SelectionSource::Repository
+        );
+        assert_eq!(
+            selection_source(&cfg, None, Some(&RepoSlug::new("org/unknown").unwrap())),
+            SelectionSource::NoMatchingEntry
+        );
+        assert_eq!(
+            selection_source(
+                &cfg,
+                Some(&assignment),
+                Some(&RepoSlug::new("org/unknown").unwrap())
+            ),
+            SelectionSource::Assignment
+        );
+
+        let mut view = build_status(&cfg, false);
+        view.vm = Some(build_vm_status(&cfg, &inst).unwrap());
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["vm"],
+            serde_json::json!({"name":"projects", "assigned_entry":"org/entry", "source":"assignment"})
+        );
+        assert_eq!(json["entries"][0]["repo"], "org/entry");
+        assert!(!json.to_string().contains("never_print"));
+        let text = format_status(&view);
+        assert!(
+            text.contains("projects") && text.contains("org/entry") && text.contains("Assignment")
+        );
+        cfg.github = None;
+        let mut view = build_status(&cfg, false);
+        view.vm = Some(build_vm_status(&cfg, &inst).unwrap());
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["vm"]["source"],
+            "missing_assignment"
+        );
+        assert!(format_status(&view).contains("unassign-pat --vm projects"));
+        crate::github_assignment::Assignment::remove(&inst).unwrap();
+        assert_eq!(
+            build_vm_status(&cfg, &inst).unwrap().source,
+            SelectionSource::Off
+        );
+        for (auth, source) in [
+            (GitHubAuth::Auto, SelectionSource::Auto),
+            (GitHubAuth::Env, SelectionSource::Env),
+            (
+                GitHubAuth::Pat(crate::config::PatConfig::default()),
+                SelectionSource::NoMatchingEntry,
+            ),
+        ] {
+            cfg.github = Some(auth);
+            assert_eq!(build_vm_status(&cfg, &inst).unwrap().source, source);
+        }
     }
 
     #[test]

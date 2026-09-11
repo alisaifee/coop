@@ -14,6 +14,9 @@
 #
 # Form B — table, required when you want per-repo PAT entries.
 # Run `coop github setup-pat --repo owner/name` to populate it via wizard.
+# Select an existing entry for a VM with:
+#   coop github assign-pat --vm projects --repo owner/name
+# The VM stores only the entry key; it overrides workspace-based selection.
 # Form B `mode = "pat"` is equivalent to form A `github = "pat"`.
 #
 # [github]

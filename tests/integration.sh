@@ -1812,6 +1812,91 @@ CFGEOF
         fail "pat: configured token forwarded to guest" "got: ${pat_token_out:-empty}"
     fi
 
+    # Select a different existing entry, independent of the workspace origin.
+    cat >> "$cfg_file" <<CFGEOF
+
+[github.pat."myorg/assigned"]
+token = "cmd:cat $tmpdir/assigned-pat.txt"
+CFGEOF
+    printf '%s' 'github_pat_ASSIGNED' > "$tmpdir/assigned-pat.txt"
+    chmod 0600 "$tmpdir/assigned-pat.txt"
+    pat_cmd() {
+        env GITHUB_TOKEN=github_pat_HOST GH_TOKEN=github_pat_OTHER_HOST \
+            "$BINARY" --config "$cfg_file" "$@"
+    }
+    if pat_cmd stop "$pat_instance" &&
+        pat_cmd github assign-pat --vm "$pat_instance" --repo myorg/assigned &&
+        pat_cmd start "$pat_instance" --no-agents --no-prompt \
+            --post-start 'printf "%s" "$GITHUB_TOKEN" > /tmp/pat-at-boot'; then
+        pat_token_out=$(pat_cmd exec "$pat_instance" -- cat /tmp/pat-at-boot) || pat_token_out=failed
+        if [[ "$pat_token_out" == github_pat_ASSIGNED ]]; then
+            pass "pat: startup session receives assigned credential"
+        else
+            fail "pat: startup session receives assigned credential"
+        fi
+        pass "pat: assign existing entry while stopped and restart"
+    else
+        fail "pat: assign existing entry while stopped and restart"
+    fi
+    local stage expected
+    for stage in assigned parent-workspace rotated unassigned; do
+        expected=github_pat_ASSIGNED
+        case "$stage" in
+            parent-workspace)
+                # Remove only the fixture's root repo; child repositories remain.
+                mkdir -p "$ws_dir/frontend" "$ws_dir/backend"
+                mv "$ws_dir/.git" "$ws_dir/frontend/.git"
+                git -C "$ws_dir/backend" init --quiet
+                ;;
+            rotated)
+                expected=github_pat_ROTATED
+                printf '%s' "$expected" > "$tmpdir/assigned-pat.txt"
+                ;;
+            unassigned)
+                expected=absent
+                pat_cmd github unassign-pat --vm "$pat_instance" || fail "pat: unassign"
+                ;;
+        esac
+        pat_token_out=$(pat_cmd exec "$pat_instance" -- sh -c 'printf "%s" "${GITHUB_TOKEN:-absent}"') || pat_token_out=failed
+        if [[ "$pat_token_out" == "$expected" ]]; then
+            pass "pat: $stage selects expected credential"
+        else
+            fail "pat: $stage selects expected credential" "unexpected selection"
+        fi
+    done
+    # Observe the boot session itself: a later exec would resolve again.
+    pat_cmd github assign-pat --vm "$pat_instance" --repo myorg/assigned || fail "pat: reassign"
+    if pat_cmd stop "$pat_instance" && pat_cmd start "$pat_instance" --no-github --no-agents \
+        --post-start 'printf "%s" "${GITHUB_TOKEN:-absent}" > /tmp/pat-opt-out'; then
+        pat_token_out=$(pat_cmd exec "$pat_instance" -- cat /tmp/pat-opt-out) || pat_token_out=failed
+        if [[ "$pat_token_out" == absent ]]; then
+            pass "pat: no-github suppresses saved assignment at boot"
+        else
+            fail "pat: no-github suppresses saved assignment at boot"
+        fi
+    else
+        fail "pat: no-github restart"
+    fi
+    # Restore/reprovision must preserve the association across a disk replacement.
+    # Configure a post_start witness because reprovision has no CLI override.
+    {
+        cat <<'CFGEOF'
+post_start = 'printf %s "$GITHUB_TOKEN" > /tmp/pat-at-boot'
+CFGEOF
+        cat "$cfg_file"
+    } > "$tmpdir/pat-reprovision.toml"
+    cp "$tmpdir/pat-reprovision.toml" "$cfg_file"
+    if pat_cmd restore "$pat_instance" --reprovision --no-agents --no-prompt -y; then
+        pat_token_out=$(pat_cmd exec "$pat_instance" -- cat /tmp/pat-at-boot) || pat_token_out=failed
+        if [[ "$pat_token_out" == github_pat_ROTATED ]]; then
+            pass "pat: reprovision preserves assignment"
+        else
+            fail "pat: reprovision preserves assignment"
+        fi
+    else
+        fail "pat: assigned reprovision"
+    fi
+
     # Cleanup.
     env -u GITHUB_TOKEN -u ANTHROPIC_API_KEY "$BINARY" --config "$cfg_file" destroy "$pat_instance" 2>/dev/null || true
 }
