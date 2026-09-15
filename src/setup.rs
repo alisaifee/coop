@@ -893,7 +893,7 @@ fn compose_recipe(
     }
     // Direct binary download (runs as root in chroot, installs for guest user).
     s.push_str(SCRIPT_CLAUDE_CODE);
-    // Codex installs as a package with stable entrypoints under /usr/local/bin.
+    // Codex's native installer keeps the full package under the guest user's home.
     s.push_str(SCRIPT_CODEX);
     s.push_str(SCRIPT_CODEX_ACCOUNT);
     // Grok Build installs under ~/.grok/bin for the guest user.

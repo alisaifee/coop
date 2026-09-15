@@ -1338,72 +1338,27 @@ test_claude_onboarding_seed() {
     fi
 }
 
-validate_codex_package() {
-    local context="$1"
+check_native_codex() {
+    local guest_home launcher version
+    guest_home=$(guest_exec printenv HOME)
+    launcher="$guest_home/.local/bin/codex"
 
-    if guest_exec test -x /usr/local/bin/codex; then
-        pass "codex binary exists at /usr/local/bin/codex ($context)"
+    if guest_exec test -x "$launcher" \
+        && guest_exec test -L /usr/local/bin/codex \
+        && guest_exec test /usr/local/bin/codex -ef "$launcher" \
+        && [[ "$(guest_exec sh -c 'command -v codex')" == "$launcher" ]]; then
+        pass "Codex resolves through the guest's native launcher and compatibility link"
     else
-        fail "codex binary exists at /usr/local/bin/codex ($context)" \
-            "stderr: $(guest_stderr)"
-        return
+        fail "Codex resolves through the guest's native launcher and compatibility link" \
+            "expected launcher: $launcher; stderr: $(guest_stderr)"
     fi
 
-    if coop_exec /usr/local/bin/codex --version >/dev/null; then
-        pass "codex binary invocable via full path ($context)"
+    if version=$(guest_exec /usr/local/bin/codex --version) \
+        && [[ "$version" =~ ^codex-cli\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        pass "Codex is executable through the compatibility link ($version)"
     else
-        fail "codex binary invocable via full path ($context)" \
-            "stderr: $(guest_stderr)"
-    fi
-
-    if guest_exec test -x /usr/local/bin/codex-code-mode-host; then
-        pass "codex code-mode host exists and is executable ($context)"
-    else
-        fail "codex code-mode host exists and is executable ($context)" \
-            "stderr: $(guest_stderr)"
-        return
-    fi
-
-    # `--help` exits before the host initializes its transport. Stdio with EOF
-    # exercises the real entrypoint without starting a persistent service; the
-    # timeout makes a regression fail instead of hanging the integration run.
-    if coop_exec sh -c \
-        'timeout 10 /usr/local/bin/codex-code-mode-host --listen stdio </dev/null >/dev/null'; then
-        pass "codex code-mode host accepts stdio transport ($context)"
-    else
-        fail "codex code-mode host accepts stdio transport ($context)" \
-            "stderr: $(guest_stderr)"
-    fi
-
-    local codex_path code_mode_path codex_release
-    codex_path=$(guest_exec readlink -f /usr/local/bin/codex)
-    code_mode_path=$(guest_exec readlink -f /usr/local/bin/codex-code-mode-host)
-    if [[ "$codex_path" =~ ^(/usr/local/lib/codex/releases/[0-9a-f]{64})/bin/codex$ ]] \
-        && [[ "$code_mode_path" == "${BASH_REMATCH[1]}/bin/codex-code-mode-host" ]]; then
-        codex_release="${BASH_REMATCH[1]}"
-        pass "codex and code-mode host come from the same package ($context)"
-    else
-        fail "codex and code-mode host come from the same package ($context)" \
-            "codex=$codex_path host=$code_mode_path"
-        return
-    fi
-
-    if guest_exec test -x "$codex_release/codex-path/rg" \
-        -a -x "$codex_release/codex-resources/bwrap" \
-        -a -x "$codex_release/codex-resources/zsh/bin/zsh" \
-        -a -f "$codex_release/codex-package.json"; then
-        pass "codex package runtime resources are installed ($context)"
-    else
-        fail "codex package runtime resources are installed ($context)" \
-            "release=$codex_release stderr: $(guest_stderr)"
-    fi
-
-    if guest_exec test ! -w "$codex_release/bin/codex" \
-        -a ! -w "$codex_release/bin/codex-code-mode-host"; then
-        pass "codex package executables are not guest-writable ($context)"
-    else
-        fail "codex package executables are not guest-writable ($context)" \
-            "release=$codex_release stderr: $(guest_stderr)"
+        fail "Codex is executable through the compatibility link" \
+            "output: $version; stderr: $(guest_stderr)"
     fi
 }
 
@@ -1411,7 +1366,20 @@ test_codex_bin_path() {
     echo ""
     echo "=== Phase: codex binary path ==="
 
-    validate_codex_package "after provisioning"
+    if guest_exec test -x /usr/local/bin/codex; then
+        pass "codex binary exists at /usr/local/bin/codex"
+    else
+        fail "codex binary exists at /usr/local/bin/codex" "stderr: $(guest_stderr)"
+        return
+    fi
+
+    check_native_codex
+
+    if coop_exec /usr/local/bin/codex --version >/dev/null; then
+        pass "codex binary invocable via full path"
+    else
+        fail "codex binary invocable via full path" "stderr: $(guest_stderr)"
+    fi
 
     if guest_exec test -x /usr/local/bin/codex-yolo; then
         pass "codex-yolo shortcut exists"
@@ -1678,6 +1646,44 @@ test_codex_sandbox_bypass() {
     fi
 }
 
+seed_codex_update_config() {
+    # shellcheck disable=SC2016 # Keep the config and its snapshot inside the guest.
+    guest_exec sh -c '
+        set -eu
+        umask 077
+        mkdir -p "$HOME/.codex"
+        printf "\n[profiles.coop_update_test]\nmodel_reasoning_effort = \"low\"\n" \
+            >> "$HOME/.codex/config.toml"
+        cp "$HOME/.codex/config.toml" "$HOME/.codex/coop-update-config.expected"
+    '
+}
+
+check_codex_config_preserved() {
+    # shellcheck disable=SC2016 # Compare guest files without copying config to the host.
+    if guest_exec sh -c 'cmp -s "$HOME/.codex/config.toml" "$HOME/.codex/coop-update-config.expected"'; then
+        pass "$1 preserves Codex config"
+    else
+        fail "$1 preserves Codex config" "could not confirm unchanged config.toml; stderr: $(guest_stderr)"
+    fi
+}
+
+check_codex_self_update() {
+    local before="$1" after
+    if ! guest_exec codex update </dev/null; then
+        fail "guest user can run codex update without sudo" "stderr: $(guest_stderr)"
+        return
+    fi
+
+    if after=$(guest_exec codex --version) \
+        && [[ "$after" =~ ^codex-cli\ [0-9]+\.[0-9]+\.[0-9]+ ]] \
+        && [[ "$after" != "$before" ]]; then
+        pass "guest self-update changes the installed version ($before -> $after)"
+    else
+        fail "guest self-update changes the installed version" \
+            "before: $before; after: $after; stderr: $(guest_stderr)"
+    fi
+}
+
 # `coop agent update` refreshes the in-guest agent binaries (issue #402).
 # `--check` is cheap and network-tolerant (the Codex latest-version lookup
 # degrades to "unknown" on failure, so the command still exits 0). The actual
@@ -1700,65 +1706,9 @@ test_agent_update() {
     fi
 
     if [[ "$FULL" == "1" ]]; then
-        # Model the broken legacy/corrupt-package state from #442. The forced
-        # updater must rebuild an incomplete same-SHA release, not merely keep
-        # an already healthy host executable in place.
-        local installed_host installed_codex_version
-        local inactive_sha active_sha inactive_release active_release active_pid active_exe
-        inactive_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        active_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        inactive_release="/usr/local/lib/codex/releases/$inactive_sha"
-        active_release="/usr/local/lib/codex/releases/$active_sha"
-        active_pid=""
-
-        # Seed one collectable release and one whose executable is live. The
-        # updater should bound disk growth without breaking an in-flight Codex
-        # session that still needs files from its package directory.
-        # shellcheck disable=SC2016 # Variables expand in the guest's sh, not here.
-        if guest_exec sudo sh -c '
-            set -eu
-            inactive_release=$1
-            active_release=$2
-            install -d -m 755 "$inactive_release" "$active_release/bin"
-            cp /bin/sleep "$active_release/bin/hold"
-            chmod 755 "$active_release/bin/hold"
-            nohup "$active_release/bin/hold" 300 </dev/null >/dev/null 2>&1 &
-            active_pid=$!
-            echo "$active_pid" >/tmp/coop-codex-active-release.pid
-            attempt=0
-            while [ "$attempt" -lt 50 ]; do
-                executable=$(readlink -f "/proc/$active_pid/exe" 2>/dev/null || true)
-                [ "$executable" = "$active_release/bin/hold" ] && exit 0
-                attempt=$((attempt + 1))
-                sleep 0.1
-            done
-            exit 1
-        ' sh "$inactive_release" "$active_release"; then
-            active_pid=$(guest_exec cat /tmp/coop-codex-active-release.pid) \
-                || active_pid=""
-            active_exe=$(guest_exec sudo readlink -f "/proc/$active_pid/exe") \
-                || active_exe=""
-            if [[ "$active_exe" == "$active_release/bin/hold" ]]; then
-                pass "seeded inactive and live Codex releases for garbage collection"
-            else
-                fail "seeded inactive and live Codex releases for garbage collection" \
-                    "pid=${active_pid:-unknown} exe=${active_exe:-unknown} stderr: $(guest_stderr)"
-            fi
-        else
-            active_pid=$(guest_exec cat /tmp/coop-codex-active-release.pid) \
-                || active_pid=""
-            fail "seeded inactive and live Codex releases for garbage collection" \
-                "stderr: $(guest_stderr)"
-        fi
-
-        installed_host=$(guest_exec readlink -f /usr/local/bin/codex-code-mode-host)
-        installed_codex_version=$(guest_exec codex --version)
-        if guest_exec sudo rm -f "$installed_host" \
-            && guest_exec test ! -e /usr/local/bin/codex-code-mode-host; then
-            pass "removed code-mode host before updater repair test"
-        else
-            fail "removed code-mode host before updater repair test" \
-                "host=$installed_host stderr: $(guest_stderr)"
+        if ! seed_codex_update_config; then
+            fail "prepare Codex config before update" "stderr: $(guest_stderr)"
+            return
         fi
 
         if coop agent update "$INSTANCE" --codex -y; then
@@ -1777,49 +1727,36 @@ test_agent_update() {
                 "got: $ver stderr: $(guest_stderr)"
         fi
 
-        local repaired_host repaired_codex_version
-        repaired_host=$(guest_exec readlink -f /usr/local/bin/codex-code-mode-host)
-        repaired_codex_version=$(guest_exec codex --version)
-        if guest_exec test -x /usr/local/bin/codex-code-mode-host \
-            && { [[ "$repaired_codex_version" != "$installed_codex_version" ]] \
-                || [[ "$repaired_host" == "$installed_host" ]]; }; then
-            pass "codex update repairs missing code-mode host"
+        check_native_codex
+        check_codex_config_preserved "host update"
+
+        # Seed a release that supports native self-update. Starting from latest
+        # would only exercise the up-to-date path, allowing a no-op to pass.
+        local older_version="0.153.0" before
+        # shellcheck disable=SC2016 # Installer cleanup runs inside the guest.
+        if guest_exec sh -c '
+            set -eu
+            installer=$(mktemp)
+            trap '\''rm -f "$installer"'\'' EXIT
+            curl -fsSL --retry 3 --retry-all-errors \
+                -o "$installer" https://chatgpt.com/codex/install.sh
+            CODEX_NON_INTERACTIVE=1 sh "$installer" --release "$1"
+        ' sh "$older_version" \
+            && before=$(guest_exec codex --version) \
+            && [[ "$before" == "codex-cli $older_version" ]] \
+            && [[ "$before" != "$ver" ]]; then
+            pass "seed an older native Codex release ($before)"
+            check_codex_config_preserved "older-release installation"
+            check_codex_self_update "$before"
+            check_native_codex
+            check_codex_config_preserved "direct update"
         else
-            fail "codex update repairs missing code-mode host" \
-                "before=$installed_host ($installed_codex_version) after=$repaired_host ($repaired_codex_version) stderr: $(guest_stderr)"
+            fail "seed an older native Codex release" \
+                "expected: codex-cli $older_version; latest: $ver; stderr: $(guest_stderr)"
         fi
 
-        validate_codex_package "after updater repair"
-
-        if guest_exec test ! -e "$inactive_release"; then
-            pass "codex update prunes an inactive release"
-        else
-            fail "codex update prunes an inactive release" \
-                "release still exists: $inactive_release"
-        fi
-        active_exe=""
-        if [[ -n "$active_pid" ]]; then
-            active_exe=$(guest_exec sudo readlink -f "/proc/$active_pid/exe") \
-                || active_exe=""
-        fi
-        if [[ "$active_exe" == "$active_release/bin/hold" ]] \
-            && guest_exec test -d "$active_release" \
-            && guest_exec sudo kill -0 "$active_pid"; then
-            pass "codex update preserves a release with a live executable"
-        else
-            fail "codex update preserves a release with a live executable" \
-                "release=$active_release pid=${active_pid:-unknown} exe=${active_exe:-unknown} stderr: $(guest_stderr)"
-        fi
-
-        if [[ -n "$active_pid" ]]; then
-            active_exe=$(guest_exec sudo readlink -f "/proc/$active_pid/exe") \
-                || active_exe=""
-            if [[ "$active_exe" == "$active_release/bin/hold" ]]; then
-                guest_exec sudo kill "$active_pid" 2>/dev/null || true
-            fi
-        fi
-        guest_exec sudo rm -rf -- "$active_release" "$inactive_release" \
-            /tmp/coop-codex-active-release.pid || true
+        # shellcheck disable=SC2016 # Expand HOME in the guest.
+        guest_exec sh -c 'rm -f "$HOME/.codex/coop-update-config.expected"'
     else
         skip "agent update --codex" "use --full; downloads the release in-guest"
     fi
@@ -4650,7 +4587,11 @@ test_custom_profiles() {
     cat > "$cfg_file" <<'CFGEOF'
 [profiles.test-custom]
 apt_packages = ["cowsay"]
-post_install = "echo 'custom-profile-marker' > /etc/custom-profile-installed"
+post_install = '''
+echo 'custom-profile-marker' > /etc/custom-profile-installed
+printf '#!/bin/sh\necho codex-cli 9.9.9-profile\n' > /usr/local/bin/codex
+chmod 0755 /usr/local/bin/codex
+'''
 CFGEOF
 
     # Build an image with the custom profile
@@ -4682,6 +4623,34 @@ CFGEOF
     GUEST_INSTANCE="$inst_name"
     local marker
     marker=$(guest_exec cat /etc/custom-profile-installed) || marker=""
+    if [[ "$(guest_exec /usr/local/bin/codex --version)" == "codex-cli 9.9.9-profile" ]]; then
+        pass "custom profile's Codex is not replaced by the native installer"
+    else
+        fail "custom profile's Codex is not replaced by the native installer" \
+            "stderr: $(guest_stderr)"
+    fi
+
+    # This image skipped the native installer, so it exercises migration from
+    # a system command without depending on the native package's cache layout.
+    # shellcheck disable=SC2016 # Inspect the guest user's launcher.
+    if guest_exec sh -c 'test ! -e "$HOME/.local/bin/codex"'; then
+        pass "custom image has no native Codex launcher before migration"
+    else
+        fail "custom image has no native Codex launcher before migration" \
+            "stderr: $(guest_stderr)"
+    fi
+    if seed_codex_update_config; then
+        if coop agent update "$inst_name" --codex -y; then
+            pass "agent update migrates the profile's system Codex installation"
+        else
+            fail "agent update migrates the profile's system Codex installation" \
+                "stderr: $HARNESS_ERR"
+        fi
+        check_native_codex
+        check_codex_config_preserved "migration"
+    else
+        fail "prepare Codex config before migration" "stderr: $(guest_stderr)"
+    fi
     unset GUEST_INSTANCE
 
     if echo "$marker" | grep -q "custom-profile-marker"; then
@@ -5344,7 +5313,7 @@ CFGEOF
 
 test_config_dir() {
     echo ""
-    echo "=== Phase: config_dir (CLAUDE.md + rules/ + commands/) ==="
+    echo "=== Phase: config_dir (Claude customizations and preferences) ==="
 
     local inst_name="${INSTANCE}-cd"
 
@@ -5357,18 +5326,55 @@ test_config_dir() {
     echo "host-claude-marker" > "$config_src/CLAUDE.md"
     echo "host-rule-marker" > "$config_src/rules/safety.md"
     echo "host-cmd-marker" > "$config_src/commands/deploy.md"
-    echo "should-not-copy" > "$config_src/settings.json"
+    python3 - "$config_src" <<'PYFIXTURE'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = {
+    "skills/coop-personal/SKILL.md": "---\nname: coop-personal\ndescription: Import witness\n---\nPersonal skill.\n",
+    "skills/coop-personal/references/deep/data.txt": "nested-bundle-witness",
+    "skills/coop-personal/scripts/run.sh": "#!/bin/sh\nprintf executable-bundle-witness\n",
+    "agents/coop-import-agent.md": "---\nname: coop-import-agent\ndescription: Import witness\n---\nYou are a test agent.\n",
+    "output-styles/coop-import-style.md": "---\nname: coop-import-style\ndescription: Import witness\n---\nBe concise.\n",
+    "themes/coop-import-theme.json": json.dumps({"name":"Coop Import", "base":"dark", "overrides":{"claude":"#ff8800"}}),
+    "workflows/coop-import-flow.js": "export const meta = {name: 'coop-import-flow', description: 'Import witness'};\nreturn [];\n",
+    "keybindings.json": json.dumps({"bindings": []}),
+    "hooks/excluded.sh": "excluded-host-content",
+    "monitors/monitors.json": "excluded-host-content",
+    "routines/excluded.json": "excluded-host-content",
+    "plugins/installed_plugins.json": "excluded-host-content",
+    ".credentials.json": "excluded-host-content",
+}
+for folder, name in [("directory-disabled", "coop-disabled"), ("directory-enabled", "coop-enabled")]:
+    base = "skills/" + folder + "/"
+    files[base + ".claude-plugin/plugin.json"] = json.dumps({"name": name})
+    files[base + "commands/witness.md"] = "---\ndescription: Plugin witness\n---\nDo nothing.\n"
+    files[base + "scripts/start.sh"] = "#!/bin/sh\nprintf fired > /tmp/" + name + "-hook\n"
+    files[base + "hooks/hooks.json"] = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type":"command", "command": '"${CLAUDE_PLUGIN_ROOT}/scripts/start.sh"'}]}]}})
+    files[base + "monitors/monitors.json"] = "[]"
+files["settings.json"] = json.dumps({"disableAllHooks": True, "outputStyle": "coop-import-style",
+    "enabledPlugins": {"coop-disabled@skills-dir":False, "coop-enabled@skills-dir":True, "excluded@market":True},
+    "apiKeyHelper":"should-not-copy", "env":{"HOST_SECRET":"should-not-copy"}, "permissions":{"defaultMode":"plan"}})
+for relative, content in files.items():
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    if relative.endswith(".sh"):
+        path.chmod(0o755)
+PYFIXTURE
 
     local cfg_file="$cs_dir/config.toml"
     cat > "$cfg_file" <<CFGEOF
 [claude]
 github = "off"
+env_forward = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 config_dir = "$config_src"
 CFGEOF
 
     cs() {
         local rc=0
         HARNESS_OUT=$(env -u GITHUB_TOKEN -u ANTHROPIC_API_KEY \
+            CLAUDE_CODE_OAUTH_TOKEN=coop-integration-invalid \
+            ANTHROPIC_BASE_URL=http://127.0.0.1:1 \
             "$BINARY" --config "$cfg_file" "$@" 2>"$tmpdir/stderr") || rc=$?
         HARNESS_ERR=$(cat "$tmpdir/stderr")
         return $rc
@@ -5424,9 +5430,76 @@ CFGEOF
         pass "settings.json NOT copied (allowlist)"
     fi
 
+    # This probe starts real Claude without model credentials. Its init event
+    # proves native discovery before the expected authentication failure.
+    # The enabled plugin is a positive witness; neither hook may run while
+    # disableAllHooks is imported. Later we remove it to prove the hook works.
+    local native_probe
+    native_probe=$(cat <<'PYPROBE'
+import json, os, pathlib, shutil, subprocess, sys, tempfile
+root = pathlib.Path.home() / ".claude"
+mode = sys.argv[1]
+settings = json.loads((root / "settings.json").read_text())
+assert settings["permissions"]["defaultMode"] == "bypassPermissions"
+assert settings["enabledPlugins"]["coop-disabled@skills-dir"] is False
+assert "excluded@market" not in settings["enabledPlugins"]
+assert "should-not-copy" not in json.dumps(settings)
+assert (root / "skills/coop-personal/references/deep/data.txt").read_text() == "nested-bundle-witness"
+assert subprocess.check_output([str(root / "skills/coop-personal/scripts/run.sh")], text=True) == "executable-bundle-witness"
+for path in ["themes/coop-import-theme.json", "keybindings.json", "skills/directory-disabled/monitors/monitors.json"]:
+    assert (root / path).is_file(), path
+for path in ["hooks/excluded.sh", "routines/excluded.json", "monitors/monitors.json", ".credentials.json"]:
+    assert not (root / path).exists(), path
+if mode != "first" and mode != "fallback":
+    assert settings["guestImportWitness"] == 42
+    assert settings["enabledPlugins"]["guest-only@market"] is False
+# Preserve startup evidence: deleting markers here would hide a transient
+# activation during onboarding or settings recovery.
+assert not pathlib.Path("/tmp/coop-disabled-hook").exists()
+if mode != "removed":
+    assert not pathlib.Path("/tmp/coop-enabled-hook").exists()
+env = {k:v for k,v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_"))}
+env.update(CLAUDE_CONFIG_DIR=str(root), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", ANTHROPIC_BASE_URL="http://127.0.0.1:1")
+claude = shutil.which("claude") or str(pathlib.Path.home() / ".local/bin/claude")
+with tempfile.TemporaryDirectory() as cwd:
+    run = subprocess.run([claude, "-p", "import discovery probe", "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
+                         cwd=cwd, env=env, capture_output=True, text=True, timeout=45)
+records = [json.loads(line) for line in run.stdout.splitlines() if line.startswith("{")]
+init = next((row for row in records if row.get("subtype") == "init"), None)
+assert init is not None, "Claude produced no init event: " + run.stderr[-2000:]
+assert "coop-personal" in init["skills"]
+assert "coop-import-agent" in init["agents"]
+assert "coop-import-flow" in init["slash_commands"]
+assert "coop-enabled:witness" in init["slash_commands"]
+assert "coop-disabled:witness" not in init["slash_commands"]
+assert "coop-enabled" in [p["name"] for p in init["plugins"]]
+assert "coop-disabled" not in [p["name"] for p in init["plugins"]]
+assert not pathlib.Path("/tmp/coop-disabled-hook").exists()
+if mode == "removed":
+    assert "disableAllHooks" not in settings
+    assert "outputStyle" not in settings
+    assert pathlib.Path("/tmp/coop-enabled-hook").read_text() == "fired"
+else:
+    assert settings["disableAllHooks"] is True
+    assert init["output_style"] == "coop-import-style"
+    assert not pathlib.Path("/tmp/coop-enabled-hook").exists()
+print("native discovery and preferences verified with Claude " + init["claude_code_version"])
+PYPROBE
+)
+    if coop_exec python3 -c "$native_probe" first; then
+        pass "native Claude discovers complete imported bundles with disabled extensions protected"
+    else
+        fail "native Claude import contract" "$(guest_stderr)"
+    fi
+    if ! coop_exec python3 -c 'import json,pathlib; p=pathlib.Path.home()/".claude/settings.json"; s=json.loads(p.read_text()); s["guestImportWitness"]=42; s["enabledPlugins"]["guest-only@market"]=False; p.write_text(json.dumps(s))'; then
+        fail "seed unrelated guest preferences" "$(guest_stderr)"
+    fi
+
     # ── 2. Modify guest CLAUDE.md, restart → re-synced from host ──
 
     guest_exec sh -c "'echo guest-modified > /home/ubuntu/.claude/CLAUDE.md'" || true
+    # Force the next bootstrap through its real Claude onboarding invocation.
+    coop_exec sh -c 'rm -f ~/.claude.json' || true
     unset GUEST_INSTANCE
 
     cs stop "$inst_name" || true
@@ -5447,6 +5520,82 @@ CFGEOF
         pass "restart re-syncs CLAUDE.md from host"
     else
         fail "restart re-syncs CLAUDE.md from host" "got: $guest_claude"
+    fi
+    if coop_exec python3 -c "$native_probe" restart; then
+        pass "restart preserves imported disables and unrelated guest preferences"
+    else
+        fail "restart import preferences" "$(guest_stderr)"
+    fi
+
+    # Corrupt settings exercises the actual recovery path; the separate narrow
+    # snapshot must protect extensions before the next Claude invocation.
+    coop_exec sh -c 'printf invalid > ~/.claude/settings.json; rm -f ~/.claude.json' || true
+    unset GUEST_INSTANCE
+    cs stop "$inst_name" || true
+    if cs start "$inst_name"; then
+        GUEST_INSTANCE="$inst_name"
+        if coop_exec python3 -c "$native_probe" fallback; then
+            pass "settings recovery reapplies imported disabled state"
+        else
+            fail "settings recovery import preferences" "$(guest_stderr)"
+        fi
+    else
+        fail "restart with corrupt settings" "$HARNESS_ERR"
+    fi
+    GUEST_INSTANCE="$inst_name"
+    coop_exec python3 -c 'import json,pathlib; p=pathlib.Path.home()/".claude/settings.json"; s=json.loads(p.read_text()); s["guestImportWitness"]=42; s["enabledPlugins"]["guest-only@market"]=False; p.write_text(json.dumps(s))' || true
+
+    # Disabled copying retains both files and last preferences. New host files
+    # must not appear. Use a replacement config instead of an in-place sed edit.
+    echo new-host-file > "$config_src/commands/not-copied.md"
+    cat > "$cfg_file" <<'CFGDISABLED'
+[claude]
+github = "off"
+env_forward = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+config_dir = false
+CFGDISABLED
+    unset GUEST_INSTANCE
+    cs stop "$inst_name" || true
+    if cs start "$inst_name"; then
+        GUEST_INSTANCE="$inst_name"
+        if coop_exec python3 -c "$native_probe" disabled &&
+            coop_exec sh -c 'test ! -e ~/.claude/commands/not-copied.md'; then
+            pass "config_dir=false retains previous copies and disabled state without copying new files"
+        else
+            fail "disabled copying lifecycle" "$(guest_stderr)"
+        fi
+    else
+        fail "restart with copying disabled" "$HARNESS_ERR"
+    fi
+
+    # Active-source removal clears only imported overrides. Host deletion still
+    # leaves prior guest content. Keep the disabled plugin preference explicit.
+    rm "$config_src/CLAUDE.md"
+    rm -r "$config_src/skills/directory-disabled"
+    python3 - "$config_src/settings.json" <<'PYREMOVE'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]); s = json.loads(p.read_text())
+del s["disableAllHooks"]; del s["outputStyle"]
+p.write_text(json.dumps(s))
+PYREMOVE
+    cat > "$cfg_file" <<CFGRESTORE
+[claude]
+github = "off"
+env_forward = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+config_dir = "$config_src"
+CFGRESTORE
+    unset GUEST_INSTANCE
+    cs stop "$inst_name" || true
+    if cs start "$inst_name"; then
+        GUEST_INSTANCE="$inst_name"
+        if coop_exec python3 -c "$native_probe" removed &&
+            coop_exec sh -c 'test -f ~/.claude/CLAUDE.md'; then
+            pass "removed host overrides clear while deleted host content remains in guest"
+        else
+            fail "removed override lifecycle and live hook witness" "$(guest_stderr)"
+        fi
+    else
+        fail "restart after removing host overrides" "$HARNESS_ERR"
     fi
     unset GUEST_INSTANCE
 
@@ -6773,6 +6922,14 @@ test_guest_user_alt() {
             "not installed in this image (no Claude profile)"
     fi
 
+    check_native_codex
+    if coop agent update "$inst_name" --codex -y; then
+        pass "agent update --codex uses the configured guest user"
+    else
+        fail "agent update --codex uses the configured guest user" "stderr: $HARNESS_ERR"
+    fi
+    check_native_codex
+
     # The alt user must be in sudo + docker groups so the lifecycle
     # parity with `ubuntu` actually holds.
     local groups_out
@@ -6952,7 +7109,7 @@ EOF
         test_github_pat_forwarding
         test_no_github
 
-        # Config sources: CLAUDE.md + rules copy
+        # Config sources: Claude bundles, native discovery, preference refresh/recovery
         test_config_dir
 
         # [guest_env] config block + literal-over-forwarded precedence
