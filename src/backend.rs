@@ -3295,7 +3295,8 @@ fn resolve_config_source_dir(
 enum TreeCopy {
     /// Follow directory symlinks and copy hidden trees (Claude, Codex).
     Follow,
-    /// Skip directory symlinks, hidden directories, and bare git repos (Grok).
+    /// Skip directory symlinks, hidden directories other than plugin
+    /// manifests, and bare git repos (Grok).
     SkipHostTrees,
 }
 
@@ -3611,10 +3612,14 @@ fn resolve_mcp_header_secrets(
 
 /// Hidden directories (`.git`, `.venv`, caches) and bare git repos
 /// (`lkml-19.git`) are host-machine state, not guest config.
+/// `.grok-plugin` and `.claude-plugin` are plugin manifests and are copied.
 fn is_host_only_dir(name: &std::ffi::OsStr) -> bool {
     let Some(n) = name.to_str() else {
         return false;
     };
+    if n == ".grok-plugin" || n == ".claude-plugin" {
+        return false;
+    }
     n.starts_with('.')
         || std::path::Path::new(n)
             .extension()
@@ -3626,7 +3631,8 @@ fn is_host_only_dir(name: &std::ffi::OsStr) -> bool {
 /// [`TreeCopy::Follow`] materializes directory symlinks and hidden trees
 /// (Claude/Codex). [`TreeCopy::SkipHostTrees`] leaves those out so a Grok
 /// host skill tree cannot drag a checkout, venv, or lore object store into
-/// the guest.
+/// the guest. Plugin manifest directories (`.grok-plugin`,
+/// `.claude-plugin`) are still copied.
 fn copy_dir_recursive(src: &Path, dst: &Path, tree: TreeCopy) -> Result<()> {
     std::fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;
     for entry in
@@ -5077,6 +5083,63 @@ Filesystem     1M-blocks  Used Available Use% Mounted on
             !staging.path().join("skills/review/.venv").exists(),
             ".venv must not be staged"
         );
+    }
+
+    #[test]
+    fn stage_grok_files_keeps_plugin_manifest_dirs() {
+        let src = tempfile::TempDir::new().unwrap();
+        let plugin = src.path().join("plugins/custom");
+        std::fs::create_dir_all(plugin.join(".grok-plugin")).unwrap();
+        std::fs::write(
+            plugin.join(".grok-plugin/plugin.json"),
+            r#"{"name":"custom","skills":"./custom-skills"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            r#"{"name":"custom","skills":"./custom-skills"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin.join("custom-skills")).unwrap();
+        std::fs::write(plugin.join("custom-skills/SKILL.md"), "from-manifest").unwrap();
+        std::fs::create_dir_all(plugin.join(".git")).unwrap();
+        std::fs::write(plugin.join(".git/HEAD"), "ref").unwrap();
+        std::fs::create_dir_all(plugin.join(".venv/bin")).unwrap();
+        std::fs::write(plugin.join(".venv/bin/python"), "py").unwrap();
+
+        let staging = stage_selected_files(
+            src.path(),
+            GROK_ALLOWED_FILES,
+            GROK_ALLOWED_DIRS,
+            TreeCopy::SkipHostTrees,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                staging
+                    .path()
+                    .join("plugins/custom/.grok-plugin/plugin.json")
+            )
+            .unwrap(),
+            r#"{"name":"custom","skills":"./custom-skills"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                staging
+                    .path()
+                    .join("plugins/custom/.claude-plugin/plugin.json")
+            )
+            .unwrap(),
+            r#"{"name":"custom","skills":"./custom-skills"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(staging.path().join("plugins/custom/custom-skills/SKILL.md"))
+                .unwrap(),
+            "from-manifest"
+        );
+        assert!(!staging.path().join("plugins/custom/.git").exists());
+        assert!(!staging.path().join("plugins/custom/.venv").exists());
     }
 
     #[test]
